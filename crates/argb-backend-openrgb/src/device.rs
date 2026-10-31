@@ -105,14 +105,23 @@ pub fn hardware_brightness(mode: &ModeDescription, brightness: Brightness) -> u3
 /// Maps a pulse period onto a mode's speed range. OpenRGB defines `speed_min`
 /// as the slowest setting and `speed_max` as the fastest whatever their
 /// numeric order, so the shortest period maps to `speed_max`.
+///
+/// The mapping is logarithmic: hardware speed steps are perceived as ratios
+/// (2 s to 4 s is as big a change as 8 s to 16 s), so the geometric middle
+/// of the period range lands on the middle speed step.
 #[must_use]
+#[expect(
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    reason = "periods and speed steps are far below the precision limits of f64"
+)]
 pub fn hardware_speed(mode: &ModeDescription, period: PulsePeriod) -> u32 {
-    let slow = i64::from(mode.speed_min);
-    let fast = i64::from(mode.speed_max);
-    let position = i64::try_from(period.as_millis() - PulsePeriod::MIN_MS).unwrap_or(i64::MAX);
-    let range = i64::try_from(PulsePeriod::MAX_MS - PulsePeriod::MIN_MS).unwrap_or(i64::MAX);
-    let speed = fast + (slow - fast) * position / range;
-    u32::try_from(speed).unwrap_or(mode.speed_max)
+    let slow = f64::from(mode.speed_min);
+    let fast = f64::from(mode.speed_max);
+    let position = (period.as_millis() as f64 / PulsePeriod::MIN_MS as f64).ln()
+        / (PulsePeriod::MAX_MS as f64 / PulsePeriod::MIN_MS as f64).ln();
+    let speed = (slow - fast).mul_add(position, fast).round();
+    u32::try_from(speed as i64).unwrap_or(mode.speed_max)
 }
 
 /// Returns a copy of `mode` configured to show `color`, plus whether the
@@ -492,6 +501,21 @@ mod tests {
         assert_eq!(hardware_speed(&ascending, slowest), 0);
         assert_eq!(hardware_speed(&descending, fastest), 1);
         assert_eq!(hardware_speed(&descending, slowest), 3);
+    }
+
+    #[test]
+    fn speed_scales_logarithmically_so_the_geometric_middle_period_is_the_middle_step() {
+        let mode = ModeDescription {
+            speed_min: 0,
+            speed_max: 4,
+            ..ModeDescription::default()
+        };
+        // sqrt(500 ms * 60 000 ms), the geometric middle of the period range.
+        let middle = PulsePeriod::from_millis(5477).unwrap();
+        assert_eq!(hardware_speed(&mode, middle), 2);
+        // A linear mapping would still call 8 s "fastest"; it is a full step slower.
+        let eight_seconds = PulsePeriod::from_millis(8000).unwrap();
+        assert_eq!(hardware_speed(&mode, eight_seconds), 2);
     }
 
     #[test]

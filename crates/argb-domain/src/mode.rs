@@ -81,7 +81,7 @@ impl From<PulsePeriod> for u64 {
 /// What a device should display.
 ///
 /// Serialized as an internally tagged table, which maps directly onto a TOML
-/// table such as `mode = "pulse"`, `color = "#FF0000"`, `period_ms = 4000`.
+/// table such as `mode = "pulse"`, `color = "#FF0000"`, `period_ms = 8000`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "mode", rename_all = "snake_case")]
 pub enum LightingMode {

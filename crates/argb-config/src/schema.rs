@@ -115,6 +115,10 @@ pub struct DeviceSchema {
     pub states: BTreeMap<PowerState, LightingMode>,
 }
 
+/// Sleep pulse period of the starter configuration: a slow breath, four
+/// seconds in and four out.
+pub const STARTER_SLEEP_PERIOD_MS: u64 = 8000;
+
 impl ConfigFile {
     /// Parses and validates a TOML document.
     ///
@@ -202,7 +206,8 @@ impl ConfigFile {
                 },
                 sleep: LightingMode::Pulse {
                     color: Rgb::new(0xFF, 0, 0),
-                    period: PulsePeriod::from_millis(4000).expect("constant within bounds"),
+                    period: PulsePeriod::from_millis(STARTER_SLEEP_PERIOD_MS)
+                        .expect("constant within bounds"),
                 },
             },
             devices: BTreeMap::new(),

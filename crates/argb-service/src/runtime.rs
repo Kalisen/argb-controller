@@ -23,6 +23,11 @@ pub const IDLE_INTERVAL: Duration = Duration::from_millis(500);
 /// Pause after the host wakes before devices are driven again, so that
 /// OpenRGB and the buses underneath it have re-initialized.
 pub const RESUME_SETTLE: Duration = Duration::from_secs(2);
+/// Delays after a resume at which the active lighting is written again.
+/// Some controllers (the Gigabyte board's USB controller among them) come
+/// back to their firmware default seconds after the host is already running,
+/// wiping the first write.
+pub const RESUME_REAPPLY_DELAYS: [Duration; 2] = [Duration::from_secs(10), Duration::from_secs(30)];
 
 type OpenRgbEngine = Engine<OpenRgbDevice<OpenRgbClient>>;
 
@@ -35,6 +40,8 @@ pub struct Runtime {
     engine: Option<OpenRgbEngine>,
     last_connect_attempt: Option<Instant>,
     desired_state: PowerState,
+    /// Moments at which the state is re-applied after a resume, soonest first.
+    pending_reapplies: Vec<Instant>,
     clock: Instant,
 }
 
@@ -53,19 +60,31 @@ impl Runtime {
             engine: None,
             last_connect_attempt: None,
             desired_state: initial_state,
+            pending_reapplies: Vec::new(),
             clock: Instant::now(),
         }
     }
 
     /// Moves every device to `state`. Entering the active state from sleep
-    /// waits [`RESUME_SETTLE`] first.
+    /// waits [`RESUME_SETTLE`] first and schedules the writes of
+    /// [`RESUME_REAPPLY_DELAYS`].
     pub fn enter_state(&mut self, state: PowerState) {
         info!(%state, "entering state");
-        if state == PowerState::Active && self.desired_state == PowerState::Sleep {
+        let resuming = state == PowerState::Active && self.desired_state == PowerState::Sleep;
+        if resuming {
             std::thread::sleep(RESUME_SETTLE);
         }
         self.desired_state = state;
         self.apply();
+        self.pending_reapplies = if resuming {
+            let now = Instant::now();
+            RESUME_REAPPLY_DELAYS
+                .iter()
+                .map(|delay| now + *delay)
+                .collect()
+        } else {
+            Vec::new()
+        };
     }
 
     /// Writes the boot lighting to device memory: the state `[boot] follow`
@@ -94,6 +113,21 @@ impl Runtime {
         }
         if self.engine.is_none() && self.reconnect_due() {
             self.connect();
+        }
+        self.reapply_if_due();
+    }
+
+    /// Runs the re-applies scheduled by a resume whose time has come.
+    fn reapply_if_due(&mut self) {
+        let now = Instant::now();
+        while self
+            .pending_reapplies
+            .first()
+            .is_some_and(|due| *due <= now)
+        {
+            self.pending_reapplies.remove(0);
+            info!(state = %self.desired_state, "re-applying lighting after resume");
+            self.apply();
         }
     }
 
