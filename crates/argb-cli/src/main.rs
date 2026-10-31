@@ -7,7 +7,8 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use anyhow::{Context, bail};
-use argb_config::{ConfigError, ConfigFile, ConfigStore, DeviceSchema, paths};
+use argb_backend_openrgb::{ModeMap, OpenRgbClient, assign_aliases};
+use argb_config::{ConfigError, ConfigFile, ConfigStore, DeviceSchema, OpenRgbSettings, paths};
 use argb_domain::{Backend, Brightness, DeviceAlias, LightingMode, PowerState, PulsePeriod, Rgb};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
@@ -26,6 +27,9 @@ struct Cli {
     command: TopCommand,
 }
 
+/// Name this tool registers with the OpenRGB server.
+const CLIENT_NAME: &str = "argb-cli";
+
 #[derive(Subcommand)]
 enum TopCommand {
     /// Inspect or change the configuration.
@@ -33,6 +37,17 @@ enum TopCommand {
         #[command(subcommand)]
         command: ConfigCommand,
     },
+    /// Inspect the devices the backends expose.
+    Devices {
+        #[command(subcommand)]
+        command: DevicesCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum DevicesCommand {
+    /// List the controllers OpenRGB reports and the alias each one maps to.
+    List,
 }
 
 #[derive(Subcommand)]
@@ -176,8 +191,60 @@ impl ModeArgs {
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     let store = ConfigStore::new(cli.config.unwrap_or_else(paths::default_config_path));
-    let TopCommand::Config { command } = cli.command;
-    run_config(&store, command)
+    match cli.command {
+        TopCommand::Config { command } => run_config(&store, command),
+        TopCommand::Devices { command } => run_devices(&store, &command),
+    }
+}
+
+fn run_devices(store: &ConfigStore, command: &DevicesCommand) -> anyhow::Result<()> {
+    let DevicesCommand::List = command;
+    let config = if store.exists() {
+        store.load()?
+    } else {
+        ConfigFile::starter()
+    };
+    list_devices(&config)
+}
+
+/// Prints one line per controller: index, alias (marked `*` when it comes
+/// from the configuration), device type, capabilities and reported name.
+fn list_devices(config: &ConfigFile) -> anyhow::Result<()> {
+    let OpenRgbSettings { host, port } = &config.openrgb;
+    let mut client = OpenRgbClient::connect(host, *port, CLIENT_NAME).with_context(|| {
+        format!("connecting to OpenRGB at {host}:{port}; is the SDK server enabled?")
+    })?;
+    let controllers = client.controllers()?;
+    let profile = config.to_profile();
+
+    println!(
+        "{:>5}  {:<34}{:<13}{:<9}name",
+        "index", "alias", "type", "caps"
+    );
+    for assignment in assign_aliases(&profile, &controllers) {
+        let controller = &controllers[assignment.index as usize];
+        let caps = ModeMap::analyze(controller).capabilities(controller);
+        let flags = format!(
+            "{}{}{}{}",
+            if caps.direct { 'D' } else { '-' },
+            if caps.hardware_brightness { 'B' } else { '-' },
+            if caps.hardware_pulse { 'P' } else { '-' },
+            if caps.persistent_memory { 'S' } else { '-' },
+        );
+        let alias = format!(
+            "{}{}",
+            assignment.alias,
+            if assignment.configured { " *" } else { "" }
+        );
+        println!(
+            "{:>5}  {:<34}{:<13}{:<9}{}",
+            assignment.index, alias, controller.device_type, flags, controller.name
+        );
+    }
+    println!();
+    println!("caps: D direct, B hardware brightness, P hardware pulse, S persistent memory");
+    println!("*: alias taken from the configuration; others are derived from the name");
+    Ok(())
 }
 
 fn run_config(store: &ConfigStore, command: ConfigCommand) -> anyhow::Result<()> {

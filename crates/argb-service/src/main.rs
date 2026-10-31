@@ -3,12 +3,15 @@
 //! Runs as a service by default. Pass `--console` to run the same logic in
 //! the foreground for development.
 
+mod runtime;
+
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::time::Duration;
 
 use argb_config::{ConfigStore, paths};
 use argb_domain::PowerState;
-use tracing::{error, info, warn};
+use tracing::{error, info};
+
+use crate::runtime::Runtime;
 
 /// Service name registered with the Service Control Manager.
 pub const SERVICE_NAME: &str = "argb-controller";
@@ -16,8 +19,6 @@ pub const SERVICE_NAME: &str = "argb-controller";
 pub const SERVICE_DISPLAY_NAME: &str = "ARGB Controller";
 /// Flag that runs the service logic in the foreground.
 const CONSOLE_FLAG: &str = "--console";
-/// How long the loop waits between checks when there is no work.
-const IDLE_POLL: Duration = Duration::from_millis(500);
 
 /// Commands delivered to the run loop.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -65,28 +66,22 @@ fn install_ctrlc(on_stop: impl FnOnce() + Send + 'static) {
 
 /// The service body shared by console and service modes.
 ///
-/// Phase 1 milestone 1 will connect this loop to the OpenRGB backend and the
-/// engine. For now it loads the configuration and logs the transitions it
-/// would make, so the service plumbing can be installed and exercised.
+/// Connects to OpenRGB (retrying until it is up), applies the active state,
+/// then serves commands from the control handler while ticking the software
+/// pulse and following configuration changes.
 fn run_loop(rx: &Receiver<Command>) -> anyhow::Result<()> {
     let store = ConfigStore::new(paths::default_config_path());
-    match store.load() {
-        Ok(config) => {
-            info!(path = %store.path().display(), devices = config.devices.len(), "configuration loaded");
-        }
-        Err(error) => {
-            warn!(path = %store.path().display(), %error, "configuration unavailable; using nothing");
-        }
-    }
+    let mut runtime = Runtime::new(store, PowerState::Active);
 
     loop {
-        match rx.recv_timeout(IDLE_POLL) {
-            Ok(Command::EnterState(state)) => info!(%state, "entering state"),
+        runtime.poll();
+        match rx.recv_timeout(runtime.wait_interval()) {
+            Ok(Command::EnterState(state)) => runtime.enter_state(state),
             Ok(Command::Stop) => {
                 info!("stopping");
                 return Ok(());
             }
-            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Timeout) => runtime.tick(),
             Err(mpsc::RecvTimeoutError::Disconnected) => {
                 error!("command channel closed unexpectedly");
                 return Ok(());

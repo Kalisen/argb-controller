@@ -4,9 +4,14 @@ use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
 use std::time::Duration;
 
+use argb_domain::Rgb;
 use thiserror::Error;
-use tracing::{debug, info};
+use tracing::{debug, info, trace};
 
+use crate::description::{
+    ControllerDescription, ModeDescription, encode_led_update, encode_mode_update,
+    strip_size_prefix,
+};
 use crate::protocol::{
     HEADER_LEN, Header, MAX_PROTOCOL_VERSION, MIN_PROTOCOL_VERSION, PacketId, ProtocolError,
     SERVER_DEVICE_INDEX,
@@ -19,7 +24,7 @@ pub const IO_TIMEOUT: Duration = Duration::from_secs(5);
 #[derive(Debug, Error)]
 pub enum OpenRgbError {
     /// Socket failure.
-    #[error("OpenRGB connection error: {0}")]
+    #[error("OpenRGB connection failed")]
     Io(#[from] std::io::Error),
     /// The host name resolved to nothing.
     #[error("OpenRGB host {0:?} did not resolve to an address")]
@@ -46,6 +51,38 @@ pub enum OpenRgbError {
         /// Version this client requires.
         required: u32,
     },
+}
+
+/// The subset of controller operations the device adapter needs. Implemented
+/// by [`OpenRgbClient`]; tests implement it with a recorder.
+pub trait ControllerCommands {
+    /// Sets `mode_index` active with the parameters in `mode`.
+    ///
+    /// # Errors
+    /// [`OpenRgbError`] on I/O failure.
+    fn update_mode(
+        &mut self,
+        controller: u32,
+        mode_index: u32,
+        mode: &ModeDescription,
+    ) -> Result<(), OpenRgbError>;
+
+    /// Like [`Self::update_mode`], and asks the controller to store the mode.
+    ///
+    /// # Errors
+    /// [`OpenRgbError`] on I/O failure.
+    fn save_mode(
+        &mut self,
+        controller: u32,
+        mode_index: u32,
+        mode: &ModeDescription,
+    ) -> Result<(), OpenRgbError>;
+
+    /// Writes every LED color of the controller.
+    ///
+    /// # Errors
+    /// [`OpenRgbError`] on I/O failure.
+    fn update_leds(&mut self, controller: u32, colors: &[Rgb]) -> Result<(), OpenRgbError>;
 }
 
 /// A connected SDK client.
@@ -91,6 +128,38 @@ impl OpenRgbClient {
         read_u32(&payload, PacketId::RequestControllerCount)
     }
 
+    /// The description of controller `index`.
+    ///
+    /// # Errors
+    /// [`OpenRgbError`] on I/O or protocol failure.
+    pub fn controller(&mut self, index: u32) -> Result<ControllerDescription, OpenRgbError> {
+        self.send(
+            index,
+            PacketId::RequestControllerData,
+            &self.protocol_version.to_le_bytes(),
+        )?;
+        let payload = self.receive(PacketId::RequestControllerData)?;
+        let body = strip_size_prefix(&payload)?;
+        Ok(ControllerDescription::decode(body, self.protocol_version)?)
+    }
+
+    /// Descriptions of every controller, in index order.
+    ///
+    /// # Errors
+    /// [`OpenRgbError`] on I/O or protocol failure.
+    pub fn controllers(&mut self) -> Result<Vec<ControllerDescription>, OpenRgbError> {
+        let count = self.controller_count()?;
+        (0..count).map(|index| self.controller(index)).collect()
+    }
+
+    /// Switches a controller to its direct or custom mode.
+    ///
+    /// # Errors
+    /// [`OpenRgbError`] on I/O failure.
+    pub fn set_custom_mode(&mut self, controller: u32) -> Result<(), OpenRgbError> {
+        self.send(controller, PacketId::SetCustomMode, &[])
+    }
+
     fn negotiate_protocol(&mut self) -> Result<(), OpenRgbError> {
         self.send(
             SERVER_DEVICE_INDEX,
@@ -126,15 +195,15 @@ impl OpenRgbClient {
             packet_id,
             payload_len: u32::try_from(payload.len()).expect("payload fits in u32"),
         };
-        debug!(?header, "sending");
+        trace!(?header, "sending");
         self.stream.write_all(&header.encode())?;
         self.stream.write_all(payload)?;
         self.stream.flush()?;
         Ok(())
     }
 
-    /// Reads packets until one of kind `expected` arrives, skipping unsolicited
-    /// device-list notifications.
+    /// Reads packets until one of kind `expected` arrives, skipping anything
+    /// the server sends on its own.
     fn receive(&mut self, expected: PacketId) -> Result<Vec<u8>, OpenRgbError> {
         loop {
             let mut header_bytes = [0u8; HEADER_LEN];
@@ -142,11 +211,12 @@ impl OpenRgbClient {
             let header = Header::decode(&header_bytes)?;
             let mut payload = vec![0u8; header.payload_len as usize];
             self.stream.read_exact(&mut payload)?;
-            debug!(?header, "received");
+            trace!(?header, "received");
             if header.packet_id == expected {
                 return Ok(payload);
             }
-            if header.packet_id == PacketId::DeviceListUpdated {
+            if header.packet_id.is_unsolicited() {
+                debug!(packet = ?header.packet_id, "ignoring unsolicited packet");
                 continue;
             }
             return Err(OpenRgbError::UnexpectedPacket {
@@ -154,6 +224,32 @@ impl OpenRgbClient {
                 got: header.packet_id,
             });
         }
+    }
+}
+
+impl ControllerCommands for OpenRgbClient {
+    fn update_mode(
+        &mut self,
+        controller: u32,
+        mode_index: u32,
+        mode: &ModeDescription,
+    ) -> Result<(), OpenRgbError> {
+        let payload = encode_mode_update(mode_index, mode, self.protocol_version);
+        self.send(controller, PacketId::UpdateMode, &payload)
+    }
+
+    fn save_mode(
+        &mut self,
+        controller: u32,
+        mode_index: u32,
+        mode: &ModeDescription,
+    ) -> Result<(), OpenRgbError> {
+        let payload = encode_mode_update(mode_index, mode, self.protocol_version);
+        self.send(controller, PacketId::SaveMode, &payload)
+    }
+
+    fn update_leds(&mut self, controller: u32, colors: &[Rgb]) -> Result<(), OpenRgbError> {
+        self.send(controller, PacketId::UpdateLeds, &encode_led_update(colors))
     }
 }
 
@@ -178,6 +274,14 @@ mod tests {
     use std::thread;
 
     use super::*;
+    use crate::description::tests::sample_controller;
+
+    /// What the fake server saw from the client.
+    #[derive(Debug, Default)]
+    struct Observed {
+        client_name: Vec<u8>,
+        packets: Vec<(Header, Vec<u8>)>,
+    }
 
     fn read_packet(stream: &mut TcpStream) -> (Header, Vec<u8>) {
         let mut header = [0u8; HEADER_LEN];
@@ -188,9 +292,9 @@ mod tests {
         (header, payload)
     }
 
-    fn reply(stream: &mut TcpStream, id: PacketId, payload: &[u8]) {
+    fn reply(stream: &mut TcpStream, device_index: u32, id: PacketId, payload: &[u8]) {
         let header = Header {
-            device_index: 0,
+            device_index,
             packet_id: id,
             payload_len: u32::try_from(payload.len()).unwrap(),
         };
@@ -198,57 +302,141 @@ mod tests {
         stream.write_all(payload).unwrap();
     }
 
-    /// A minimal fake server: answers version negotiation, records the client
-    /// name, then reports `count` controllers after an unsolicited notification.
-    fn fake_server(server_version: u32, count: u32) -> (SocketAddr, thread::JoinHandle<Vec<u8>>) {
+    /// A fake server speaking `server_version` that exposes `controllers` and
+    /// records every packet after the handshake until the client disconnects.
+    fn fake_server(
+        server_version: u32,
+        controllers: Vec<ControllerDescription>,
+    ) -> (SocketAddr, thread::JoinHandle<Observed>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         let handle = thread::spawn(move || {
+            let mut observed = Observed::default();
             let (mut stream, _) = listener.accept().unwrap();
+            let serialize_version = server_version.min(MAX_PROTOCOL_VERSION);
 
             let (header, _) = read_packet(&mut stream);
             assert_eq!(header.packet_id, PacketId::RequestProtocolVersion);
             reply(
                 &mut stream,
+                0,
                 PacketId::RequestProtocolVersion,
                 &server_version.to_le_bytes(),
             );
-
             if server_version < MIN_PROTOCOL_VERSION {
-                return Vec::new();
+                return observed;
             }
 
             let (header, name) = read_packet(&mut stream);
             assert_eq!(header.packet_id, PacketId::SetClientName);
+            observed.client_name = name;
 
-            let (header, _) = read_packet(&mut stream);
-            assert_eq!(header.packet_id, PacketId::RequestControllerCount);
-            reply(&mut stream, PacketId::DeviceListUpdated, &[]);
-            reply(
-                &mut stream,
-                PacketId::RequestControllerCount,
-                &count.to_le_bytes(),
-            );
-            name
+            loop {
+                let mut header_bytes = [0u8; HEADER_LEN];
+                if stream.read_exact(&mut header_bytes).is_err() {
+                    return observed;
+                }
+                let header = Header::decode(&header_bytes).unwrap();
+                let mut payload = vec![0u8; header.payload_len as usize];
+                stream.read_exact(&mut payload).unwrap();
+                match header.packet_id {
+                    PacketId::RequestControllerCount => {
+                        // Interleave an unsolicited notification to prove the client skips it.
+                        reply(&mut stream, 0, PacketId::DeviceListUpdated, &[]);
+                        let count = u32::try_from(controllers.len()).unwrap();
+                        reply(
+                            &mut stream,
+                            0,
+                            PacketId::RequestControllerCount,
+                            &count.to_le_bytes(),
+                        );
+                    }
+                    PacketId::RequestControllerData => {
+                        let requested = u32::from_le_bytes(payload[0..4].try_into().unwrap());
+                        assert_eq!(requested, serialize_version);
+                        let body =
+                            controllers[header.device_index as usize].encode(serialize_version);
+                        let mut reply_payload = Vec::new();
+                        let total = u32::try_from(body.len() + 4).unwrap();
+                        reply_payload.extend_from_slice(&total.to_le_bytes());
+                        reply_payload.extend_from_slice(&body);
+                        reply(
+                            &mut stream,
+                            header.device_index,
+                            PacketId::RequestControllerData,
+                            &reply_payload,
+                        );
+                    }
+                    _ => observed.packets.push((header, payload)),
+                }
+            }
         });
         (addr, handle)
     }
 
+    fn connect(addr: SocketAddr) -> OpenRgbClient {
+        OpenRgbClient::connect(&addr.ip().to_string(), addr.port(), "test").unwrap()
+    }
+
     #[test]
     fn connects_negotiates_and_counts_controllers() {
-        let (addr, server) = fake_server(MAX_PROTOCOL_VERSION + 1, 3);
-        let mut client =
-            OpenRgbClient::connect(&addr.ip().to_string(), addr.port(), "test").unwrap();
+        let (addr, server) = fake_server(MAX_PROTOCOL_VERSION + 2, vec![sample_controller(); 3]);
+        let mut client = connect(addr);
         assert_eq!(client.protocol_version(), MAX_PROTOCOL_VERSION);
         assert_eq!(client.controller_count().unwrap(), 3);
-        assert_eq!(server.join().unwrap(), b"test\0");
+        drop(client);
+        assert_eq!(server.join().unwrap().client_name, b"test\0");
     }
 
     #[test]
     fn refuses_servers_older_than_required() {
-        let (addr, server) = fake_server(MIN_PROTOCOL_VERSION - 1, 0);
+        let (addr, server) = fake_server(MIN_PROTOCOL_VERSION - 1, Vec::new());
         let result = OpenRgbClient::connect(&addr.ip().to_string(), addr.port(), "test");
         assert!(matches!(result, Err(OpenRgbError::ProtocolTooOld { .. })));
         server.join().unwrap();
+    }
+
+    #[test]
+    fn fetches_controller_descriptions() {
+        let expected = sample_controller();
+        let (addr, server) = fake_server(MAX_PROTOCOL_VERSION, vec![expected.clone()]);
+        let mut client = connect(addr);
+        assert_eq!(client.controllers().unwrap(), vec![expected]);
+        drop(client);
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn sends_mode_and_led_updates_with_the_negotiated_layout() {
+        let (addr, server) = fake_server(MIN_PROTOCOL_VERSION, Vec::new());
+        let mut client = connect(addr);
+        let mode = sample_controller().modes[1].clone();
+        client.update_mode(2, 1, &mode).unwrap();
+        client.save_mode(2, 1, &mode).unwrap();
+        client.update_leds(2, &[Rgb::WHITE]).unwrap();
+        client.set_custom_mode(2).unwrap();
+        drop(client);
+
+        let observed = server.join().unwrap();
+        let kinds: Vec<_> = observed
+            .packets
+            .iter()
+            .map(|(h, _)| (h.device_index, h.packet_id))
+            .collect();
+        assert_eq!(
+            kinds,
+            vec![
+                (2, PacketId::UpdateMode),
+                (2, PacketId::SaveMode),
+                (2, PacketId::UpdateLeds),
+                (2, PacketId::SetCustomMode)
+            ]
+        );
+        assert_eq!(
+            observed.packets[0].1,
+            encode_mode_update(1, &mode, MIN_PROTOCOL_VERSION)
+        );
+        assert_eq!(observed.packets[2].1, encode_led_update(&[Rgb::WHITE]));
+        assert!(observed.packets[3].1.is_empty());
     }
 }

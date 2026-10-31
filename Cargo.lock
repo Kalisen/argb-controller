@@ -82,6 +82,7 @@ name = "argb-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "argb-backend-openrgb",
  "argb-config",
  "argb-domain",
  "clap",

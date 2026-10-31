@@ -6,8 +6,13 @@ while the machine is awake and what it shows while the machine sleeps.
 
 ## Status
 
-Early development. See `docs/requirements.md` for the scope and `docs/architecture.md`
-for the design once they land on `main`.
+Early development. The service connects to a local OpenRGB SDK server, maps its
+controllers to configured aliases and applies the configured lighting; `argb devices list`
+shows that mapping. Sleep handling, synchronized pulsing and the installer are still to
+come. See `docs/requirements.md` for the scope and `docs/architecture.md` for the design.
+
+Running it today needs [OpenRGB](https://openrgb.org) 1.0 (the PawnIO build) with its SDK
+server enabled on the loopback interface.
 
 ## Phases
 

@@ -1,6 +1,6 @@
 //! The contract every backend device fulfils.
 
-use argb_domain::{Brightness, DeviceAlias, DeviceCapabilities, PulsePeriod, Rgb};
+use argb_domain::{Brightness, DeviceAlias, DeviceCapabilities, PowerState, PulsePeriod, Rgb};
 use thiserror::Error;
 
 /// Whether a hardware mode should be written to the device's own memory.
@@ -10,6 +10,23 @@ pub enum Persist {
     Volatile,
     /// Apply and store, so it shows during boot and while the host is asleep.
     SaveToDevice,
+}
+
+impl Persist {
+    /// The policy for entering `state` when boot lighting follows `boot_follow`.
+    ///
+    /// Sleep lighting is always stored: nothing can stream to the devices
+    /// while the host sleeps. The state boot lighting follows is stored too,
+    /// so that it is what the devices show from power-on until the service
+    /// runs. Everything else is left volatile to spare the devices' memory.
+    #[must_use]
+    pub fn for_state(state: PowerState, boot_follow: PowerState) -> Self {
+        if state == PowerState::Sleep || state == boot_follow {
+            Persist::SaveToDevice
+        } else {
+            Persist::Volatile
+        }
+    }
 }
 
 /// Errors a device can report.
@@ -76,4 +93,25 @@ pub trait LightingDevice {
     /// # Errors
     /// [`DeviceError`] from the backend.
     fn write_direct(&mut self, color: Rgb) -> Result<(), DeviceError>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sleep_and_the_boot_state_are_saved_to_device() {
+        assert_eq!(
+            Persist::for_state(PowerState::Sleep, PowerState::Active),
+            Persist::SaveToDevice
+        );
+        assert_eq!(
+            Persist::for_state(PowerState::Active, PowerState::Active),
+            Persist::SaveToDevice
+        );
+        assert_eq!(
+            Persist::for_state(PowerState::Active, PowerState::Sleep),
+            Persist::Volatile
+        );
+    }
 }
