@@ -7,7 +7,9 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use anyhow::{Context, bail};
-use argb_config::{ConfigError, ConfigFile, ConfigStore, DeviceSchema, paths};
+use argb_backend_openrgb::protocol::{ColorMode, mode_flags};
+use argb_backend_openrgb::{ControllerDescription, ModeMap, OpenRgbClient, assign_aliases};
+use argb_config::{ConfigError, ConfigFile, ConfigStore, DeviceSchema, OpenRgbSettings, paths};
 use argb_domain::{Backend, Brightness, DeviceAlias, LightingMode, PowerState, PulsePeriod, Rgb};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
@@ -26,12 +28,32 @@ struct Cli {
     command: TopCommand,
 }
 
+/// Name this tool registers with the OpenRGB server.
+const CLIENT_NAME: &str = "argb-cli";
+
 #[derive(Subcommand)]
 enum TopCommand {
     /// Inspect or change the configuration.
     Config {
         #[command(subcommand)]
         command: ConfigCommand,
+    },
+    /// Inspect the devices the backends expose.
+    Devices {
+        #[command(subcommand)]
+        command: DevicesCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum DevicesCommand {
+    /// List the controllers OpenRGB reports and the alias each one maps to.
+    List,
+    /// Print everything OpenRGB reports about one controller: modes with
+    /// their flags and ranges, zones and LED count.
+    Show {
+        /// Controller index as printed by `devices list`.
+        index: u32,
     },
 }
 
@@ -176,8 +198,133 @@ impl ModeArgs {
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     let store = ConfigStore::new(cli.config.unwrap_or_else(paths::default_config_path));
-    let TopCommand::Config { command } = cli.command;
-    run_config(&store, command)
+    match cli.command {
+        TopCommand::Config { command } => run_config(&store, command),
+        TopCommand::Devices { command } => run_devices(&store, &command),
+    }
+}
+
+fn run_devices(store: &ConfigStore, command: &DevicesCommand) -> anyhow::Result<()> {
+    let config = if store.exists() {
+        store.load()?
+    } else {
+        ConfigFile::starter()
+    };
+    match command {
+        DevicesCommand::List => list_devices(&config),
+        DevicesCommand::Show { index } => show_device(&config, *index),
+    }
+}
+
+fn connect(config: &ConfigFile) -> anyhow::Result<OpenRgbClient> {
+    let OpenRgbSettings { host, port } = &config.openrgb;
+    OpenRgbClient::connect(host, *port, CLIENT_NAME).with_context(|| {
+        format!("connecting to OpenRGB at {host}:{port}; is the SDK server enabled?")
+    })
+}
+
+fn show_device(config: &ConfigFile, index: u32) -> anyhow::Result<()> {
+    let mut client = connect(config)?;
+    let count = client.controller_count()?;
+    if index >= count {
+        bail!("controller index {index} is out of range; OpenRGB reports {count} controllers");
+    }
+    let controller = client.controller(index)?;
+    print_controller(index, &controller);
+    Ok(())
+}
+
+fn print_controller(index: u32, controller: &ControllerDescription) {
+    let modes = ModeMap::analyze(controller);
+    let caps = modes.capabilities(controller);
+    println!("controller {index}: {}", controller.name);
+    println!(
+        "  type: {}  vendor: {}  version: {}",
+        controller.device_type, controller.vendor, controller.version
+    );
+    println!("  description: {}", controller.description);
+    println!(
+        "  location: {}  serial: {}",
+        controller.location, controller.serial
+    );
+    println!(
+        "  leds: {}  active mode: {}",
+        controller.led_count(),
+        controller.active_mode
+    );
+    println!("  capabilities: {caps:?}");
+    println!(
+        "  roles: direct={:?} static={:?} pulse={:?}",
+        modes.direct, modes.static_mode, modes.pulse
+    );
+    println!("  modes:");
+    for (i, mode) in controller.modes.iter().enumerate() {
+        let color_mode = ColorMode::from_raw(mode.color_mode)
+            .map_or_else(|| mode.color_mode.to_string(), |m| format!("{m:?}"));
+        println!(
+            "    [{i}] {:<16} value={} flags=[{}] speed={}..{} (now {}) brightness={}..{} (now {}) colors={}..{} color_mode={color_mode}",
+            mode.name,
+            mode.value,
+            mode_flags::describe(mode.flags),
+            mode.speed_min,
+            mode.speed_max,
+            mode.speed,
+            mode.brightness_min,
+            mode.brightness_max,
+            mode.brightness,
+            mode.colors_min,
+            mode.colors_max,
+        );
+    }
+    println!("  zones:");
+    for (i, zone) in controller.zones.iter().enumerate() {
+        println!(
+            "    [{i}] {:<16} type={} leds={} ({}..{}) segments={}",
+            zone.name,
+            zone.zone_type,
+            zone.leds_count,
+            zone.leds_min,
+            zone.leds_max,
+            zone.segments.len()
+        );
+    }
+}
+
+/// Prints one line per controller: index, alias (marked `*` when it comes
+/// from the configuration), device type, capabilities and reported name.
+fn list_devices(config: &ConfigFile) -> anyhow::Result<()> {
+    let mut client = connect(config)?;
+    let controllers = client.controllers()?;
+    let profile = config.to_profile();
+
+    println!(
+        "{:>5}  {:<34}{:<13}{:<9}name",
+        "index", "alias", "type", "caps"
+    );
+    for assignment in assign_aliases(&profile, &controllers) {
+        let controller = &controllers[assignment.index as usize];
+        let caps = ModeMap::analyze(controller).capabilities(controller);
+        let flags = format!(
+            "{}{}{}{}",
+            if caps.direct { 'D' } else { '-' },
+            if caps.hardware_brightness { 'B' } else { '-' },
+            if caps.hardware_pulse { 'P' } else { '-' },
+            if caps.persistent_memory { 'S' } else { '-' },
+        );
+        let alias = format!(
+            "{}{}",
+            assignment.alias,
+            if assignment.configured { " *" } else { "" }
+        );
+        println!(
+            "{:>5}  {:<34}{:<13}{:<9}{}",
+            assignment.index, alias, controller.device_type, flags, controller.name
+        );
+    }
+    println!();
+    println!("caps: D direct, B hardware brightness, P hardware pulse, S persistent memory");
+    println!("*: alias taken from the configuration; others are derived from the name");
+    Ok(())
 }
 
 fn run_config(store: &ConfigStore, command: ConfigCommand) -> anyhow::Result<()> {

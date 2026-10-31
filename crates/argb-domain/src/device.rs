@@ -52,6 +52,32 @@ impl DeviceAlias {
         Ok(Self(alias))
     }
 
+    /// Alias used when `derive_from` is given a name with no usable characters.
+    pub const FALLBACK: &'static str = "device";
+
+    /// Builds an alias from a free-form device name: lower-cased, runs of
+    /// anything but letters and digits collapsed into one `-`, trimmed and
+    /// truncated to [`Self::MAX_LEN`]. Names with nothing usable become
+    /// [`Self::FALLBACK`].
+    #[must_use]
+    pub fn derive_from(name: &str) -> Self {
+        let mut alias = String::with_capacity(name.len());
+        for c in name.chars() {
+            if c.is_ascii_alphanumeric() {
+                alias.push(c.to_ascii_lowercase());
+            } else if !alias.ends_with('-') {
+                alias.push('-');
+            }
+        }
+        alias.truncate(Self::MAX_LEN);
+        let trimmed = alias.trim_matches('-');
+        if trimmed.is_empty() {
+            Self(Self::FALLBACK.to_owned())
+        } else {
+            Self(trimmed.to_owned())
+        }
+    }
+
     /// The alias text.
     #[must_use]
     pub fn as_str(&self) -> &str {
@@ -75,7 +101,7 @@ impl From<DeviceAlias> for String {
 
 impl std::fmt::Display for DeviceAlias {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
+        f.pad(&self.0)
     }
 }
 
@@ -102,7 +128,10 @@ impl DeviceSelector {
 /// What a device can do natively. Drives the engine's choice between hardware
 /// modes and software-driven direct control.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-#[expect(clippy::struct_excessive_bools, reason = "independent capability flags, not a state machine")]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent capability flags, not a state machine"
+)]
 pub struct DeviceCapabilities {
     /// Per-frame color streaming from the host.
     pub direct: bool,
@@ -128,6 +157,25 @@ mod tests {
         assert!(DeviceAlias::new("").is_err());
         assert!(DeviceAlias::new("RAM").is_err());
         assert!(DeviceAlias::new("a".repeat(DeviceAlias::MAX_LEN + 1)).is_err());
+    }
+
+    #[test]
+    fn derive_from_normalizes_reported_names() {
+        assert_eq!(
+            DeviceAlias::derive_from("Corsair Vengeance RGB DDR5").as_str(),
+            "corsair-vengeance-rgb-ddr5"
+        );
+        assert_eq!(
+            DeviceAlias::derive_from("  ASUS TUF (4080) ").as_str(),
+            "asus-tuf-4080"
+        );
+        assert_eq!(
+            DeviceAlias::derive_from("***").as_str(),
+            DeviceAlias::FALLBACK
+        );
+        let long = DeviceAlias::derive_from(&"a".repeat(DeviceAlias::MAX_LEN + 10));
+        assert_eq!(long.as_str().len(), DeviceAlias::MAX_LEN);
+        assert!(DeviceAlias::new(long.as_str()).is_ok());
     }
 
     #[test]

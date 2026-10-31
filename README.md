@@ -6,8 +6,13 @@ while the machine is awake and what it shows while the machine sleeps.
 
 ## Status
 
-Early development. See `docs/requirements.md` for the scope and `docs/architecture.md`
-for the design once they land on `main`.
+Early development. The service connects to a local OpenRGB SDK server, maps its
+controllers to configured aliases and applies the configured lighting; `argb devices list`
+shows that mapping. Sleep handling, synchronized pulsing and the installer are still to
+come. See `docs/requirements.md` for the scope and `docs/architecture.md` for the design.
+
+Running it today needs [OpenRGB](https://openrgb.org) 1.0 (the PawnIO build) with its SDK
+server enabled on the loopback interface.
 
 ## Phases
 
@@ -15,6 +20,7 @@ for the design once they land on `main`.
 |---|---|
 | 1 | In-machine hardware through [OpenRGB](https://openrgb.org): motherboard and its ARGB headers (fans, AIO), DDR5 RAM, GPU |
 | 2 | Govee devices over Bluetooth LE: Glide Hexa panels (H6061), floor lamp (H6076) |
+| 2.1 | USB peripherals: Logitech G203 Lightsync mouse (already visible through OpenRGB), Cloud Nine C959 ErgoTKL keyboard (control path to be established) |
 | 2.5 | Security review of everything implemented so far; every finding is fixed before Phase 3 |
 | 3 | Samsung Odyssey Neo G9 rear lighting, pending a feasible control path |
 

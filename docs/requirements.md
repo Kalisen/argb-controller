@@ -11,6 +11,7 @@ service makes every device follow it, whether the machine is awake or asleep.
 | 1 | In-machine hardware through OpenRGB | Every Phase 1 device follows the configuration in both power states and shows the configured boot lighting during POST |
 | 2 | Govee Glide Hexa (H6061) and Govee floor lamp (H6076) over Bluetooth LE | Both devices follow the configuration in both power states |
 | 2.5 | Security review of all code written so far | Every finding is fixed and the fixes are covered by tests |
+| 2.1 | USB peripherals: Logitech G203 Lightsync mouse, Cloud Nine C959 ErgoTKL keyboard | Both follow the configuration like any other device; the keyboard's control path (OpenRGB, vendor protocol or unsupported) is documented |
 | 3 | Samsung Odyssey Neo G9 57" (G95NC) rear lighting | A feasible control path exists and the monitor follows the configuration, or the device is documented as unsupported |
 
 ## Phase 1 hardware
@@ -22,6 +23,13 @@ service makes every device follow it, whether the machine is awake or asleep.
 | Arctic Liquid Freezer III 360 A-RGB | Board ARGB header | Same controller as the board |
 | Corsair Vengeance RGB DDR5 (2 x 32 GB) | SMBus | OpenRGB "Corsair DRAM" |
 | ASUS GeForce RTX 4080 TUF Gaming OC | I2C over the NVIDIA driver | OpenRGB "ASUS Aura GPU" |
+
+## Phase 2.1 hardware
+
+| Device | Connection | Controlled through |
+|---|---|---|
+| Logitech G203 Lightsync | USB HID | OpenRGB "Logitech G203 Lightsync" (detected; Static mode currently ignores the color, to investigate) |
+| Cloud Nine C959 ErgoTKL (Cherry MX Brown) | USB HID | Unknown; not in the OpenRGB device list as of 1.1, the vendor ships its own Windows application |
 
 ## Functional requirements
 

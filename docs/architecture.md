@@ -120,6 +120,63 @@ document to a temporary file in the same directory, flushes it, then renames
 it over the old file. Readers see either the old or the new document, never a
 mix. The CLI performs every edit as a locked read-modify-write.
 
+### Device matching
+
+At connection time the service lists the controllers OpenRGB reports and
+pairs each one with an alias:
+
+1. The first configured device whose `backend` is `openrgb` and whose
+   `match_name` is a case-insensitive substring of the reported name claims
+   the controller. A configured alias claims at most one controller; a
+   configured device that matches nothing is logged.
+2. Any other controller gets an alias derived from its reported name
+   (lower-cased, runs of punctuation and spaces collapsed to `-`, truncated
+   to the alias length limit, suffixed `-2`, `-3`, ... when it collides).
+   Such a device has no overrides, so it follows the state defaults.
+
+`argb devices list` prints this pairing together with each controller's
+capabilities, so the user can see what a `match_name` resolves to before
+relying on it. The same code path will feed `argb devices scan`.
+
+The adapter resolves a controller's modes by name: `Direct` for streaming,
+`Static` or `Custom` for the hardware static mode, and `Breathing`, `Color
+Pulse` or `Pulse` for the hardware pulse. Capabilities follow from the flags
+of those modes: hardware brightness when the static mode has a brightness
+range, persistent memory when either mode is saveable (explicitly or
+automatically). A mode that saves automatically receives a plain update even
+under the save-to-device policy, since a save packet would be rejected.
+
+Three rules come from the first run against the real machine:
+
+- A static mode only qualifies when it can carry a color (per-LED array or
+  at least one mode-specific slot). The Logitech G203 advertises a `Static`
+  mode with neither; selecting it just turns the light off, so such a
+  device falls back to Direct.
+- The server validates every mode update against the mode's declared
+  ranges and rejects the whole update otherwise, so the adapter never sends
+  more colors than `colors_max` and keeps speed and brightness in range.
+- When a hardware static mode stores per-LED colors in the controller
+  (Corsair DRAM over SMBus), the color write must not follow the mode
+  commit immediately: the chip is still busy and the write fails its
+  checksum, leaving the default white. The adapter waits half a second
+  between the two. OpenRGB's own window never hits this because a person
+  separates the two clicks.
+
+Zone sizes are OpenRGB's responsibility. The board's ARGB header zones
+report zero LEDs until sized in OpenRGB (which stores the sizes), and
+OpenRGB drives nothing on a zero-sized zone, so the fans and AIO stay dark
+until then.
+
+### Connection lifecycle
+
+The service connects to OpenRGB at start and retries every 5 seconds until
+the SDK server answers, so start order between the two services does not
+matter. Any backend error while applying a state or streaming a pulse frame
+drops the connection, and the next poll reconnects and reapplies the desired
+state. The configuration file's modification time is checked once a second;
+a change reloads the profile and reapplies, and a change to the `[openrgb]`
+section reconnects.
+
 ### Configuration reload
 
 The service watches the configuration file and reapplies the current state
@@ -164,12 +221,13 @@ docs/
 
 ## Milestones
 
-1. **Scaffold** (this branch): workspace, domain, config store, engine, protocol client, service and CLI skeletons, all unit tested.
-2. **Static color end to end**: controller enumeration and the `LightingDevice` adapter for OpenRGB; the service applies the active profile at start; `argb devices list`.
+1. **Scaffold** (done): workspace, domain, config store, engine, protocol client, service and CLI skeletons, all unit tested.
+2. **Static color end to end** (this branch): controller descriptions and mode/LED updates over the SDK protocol, the `LightingDevice` adapter for OpenRGB, controller-to-alias matching, a service runtime that connects with retry, applies the active profile and follows the configuration file; `argb devices list`.
 3. **Device discovery** ([issue 2](https://github.com/Kalisen/argb-controller/issues/2)): `argb devices scan` compares the controllers the backends report with the configured devices, appends a default entry for each new one (alias derived from the reported name, no overrides), and the running service applies the result through the configuration reload.
 4. **Sleep and boot**: power event handling, hardware pulse mapping, save-to-device, `argb probe-persistence`.
 5. **Synchronized pulse**: direct-mode streaming at 30 Hz with one clock.
 6. **Installer**: `argb service install`, directory ACLs, OpenRGB dependency check.
 7. **Phase 2**: Govee BLE backend.
-8. **Phase 2.5**: security review and fixes.
-9. **Phase 3**: Samsung monitor investigation.
+8. **Phase 2.1**: Logitech G203 through OpenRGB (fix the static color), Cloud Nine C959 keyboard feasibility and backend if a protocol is available.
+9. **Phase 2.5**: security review and fixes.
+10. **Phase 3**: Samsung monitor investigation.
