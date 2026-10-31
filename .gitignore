@@ -1,0 +1,17 @@
+# Rust
+/target/
+**/target/
+Cargo.lock.orig
+
+# Git worktrees used for parallel work (see CONTRIBUTING notes in README)
+/.worktrees/
+
+# Local tooling state
+/.claude/settings.local.json
+/.idea/
+/.vscode/
+*.swp
+
+# Local runtime artifacts
+*.log
+/config.local.toml
