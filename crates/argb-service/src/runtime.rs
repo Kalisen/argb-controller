@@ -4,7 +4,8 @@
 use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::Context;
-use argb_backend_openrgb::{OpenRgbClient, OpenRgbDevice, open_devices};
+use argb_backend_openrgb::client::RESCAN_QUIET_PERIOD;
+use argb_backend_openrgb::{OpenRgbClient, OpenRgbDevice, SharedClient, open_session};
 use argb_config::{ConfigFile, ConfigStore};
 use argb_domain::{DeviceAlias, LightingProfile, PowerState};
 use argb_engine::{Attendance, DEFAULT_TICK_RATE_HZ, DeviceError, Engine, LightingDevice, Persist};
@@ -29,6 +30,11 @@ pub const RESUME_SETTLE: Duration = Duration::from_secs(2);
 pub const RESUME_RESCAN_DELAY: Duration = Duration::from_secs(15);
 /// Longest wait for OpenRGB to finish detecting hardware again after a resume.
 pub const RESUME_RESCAN_TIMEOUT: Duration = Duration::from_secs(30);
+/// How long OpenRGB's device-list announcements must stop before the engine
+/// is rebuilt on the new list. OpenRGB announces once per controller while
+/// detecting, so rebuilding on the first announcement would catch the list
+/// half full; the same quiet period closes a rescan.
+pub const DEVICE_LIST_SETTLE: Duration = RESCAN_QUIET_PERIOD;
 
 type OpenRgbEngine = Engine<OpenRgbDevice<OpenRgbClient>>;
 
@@ -39,11 +45,44 @@ pub struct Runtime {
     config_modified: Option<SystemTime>,
     last_config_poll: Instant,
     engine: Option<OpenRgbEngine>,
+    /// The engine's connection, read for server notifications between writes.
+    client: Option<SharedClient<OpenRgbClient>>,
+    device_list: DeviceListWatch,
     last_connect_attempt: Option<Instant>,
     desired_state: PowerState,
     /// When the post-resume re-detection is due, if one is pending.
     rescan_due: Option<Instant>,
     clock: Instant,
+}
+
+/// Debounces OpenRGB's device-list announcements: the engine is rebuilt once
+/// they have stopped for a quiet period, not on each one.
+#[derive(Debug, Default)]
+struct DeviceListWatch {
+    /// When the latest announcement arrived, if a rebuild is pending.
+    changed_at: Option<Instant>,
+}
+
+impl DeviceListWatch {
+    /// Records an announcement at `now`. Returns whether it opened a burst
+    /// (so the caller logs the first one only).
+    fn announce(&mut self, now: Instant) -> bool {
+        let first = self.changed_at.is_none();
+        self.changed_at = Some(now);
+        first
+    }
+
+    /// Whether announcements have stopped for `quiet` as of `now`; clears
+    /// the pending rebuild when they have.
+    fn take_settled(&mut self, now: Instant, quiet: Duration) -> bool {
+        let settled = self
+            .changed_at
+            .is_some_and(|at| now.duration_since(at) >= quiet);
+        if settled {
+            self.changed_at = None;
+        }
+        settled
+    }
 }
 
 impl Runtime {
@@ -59,6 +98,8 @@ impl Runtime {
             config_modified,
             last_config_poll: Instant::now(),
             engine: None,
+            client: None,
+            device_list: DeviceListWatch::default(),
             last_connect_attempt: None,
             desired_state: initial_state,
             rescan_due: None,
@@ -101,7 +142,7 @@ impl Runtime {
     /// resume: writes report success and change nothing, and the board shows
     /// its firmware rainbow until a re-detection.
     fn rescan_after_resume(&mut self) {
-        self.engine = None;
+        self.disconnect();
         self.last_connect_attempt = None;
         let settings = &self.config.openrgb;
         let mut client = match OpenRgbClient::connect(&settings.host, settings.port, CLIENT_NAME) {
@@ -138,14 +179,23 @@ impl Runtime {
         self.handle_errors(&errors);
     }
 
-    /// Housekeeping: reconnects when disconnected, and after a configuration
-    /// change drops the engine so the next call rebuilds it from the new
-    /// configuration and the server's current device list. Call before each
-    /// wait.
+    /// Housekeeping: reconnects when disconnected, rebuilds the engine after
+    /// a configuration change or once OpenRGB's device list has changed and
+    /// settled, and runs the post-resume re-detection when due. Call before
+    /// each wait.
     pub fn poll(&mut self) {
         if self.last_config_poll.elapsed() >= CONFIG_POLL_INTERVAL {
             self.last_config_poll = Instant::now();
             self.reload_if_changed();
+        }
+        self.watch_device_list();
+        if self
+            .device_list
+            .take_settled(Instant::now(), DEVICE_LIST_SETTLE)
+        {
+            info!("OpenRGB's device list changed; rebuilding on the new list");
+            self.disconnect();
+            self.last_connect_attempt = None;
         }
         if self.engine.is_none() && self.reconnect_due() {
             self.connect();
@@ -153,6 +203,37 @@ impl Runtime {
         if self.rescan_due.is_some_and(|due| due <= Instant::now()) {
             self.rescan_due = None;
             self.rescan_after_resume();
+        }
+    }
+
+    /// Reads the notifications OpenRGB sent on the engine's connection and
+    /// notes a device-list change. The server announces one whenever its
+    /// list changes: it is still detecting when the service connects at
+    /// boot (the two start together, and the first connection saw two of
+    /// five controllers), the user rescans from its UI, or a controller is
+    /// plugged in. An engine built on the old list would drive only part of
+    /// the hardware, so it is rebuilt once the announcements settle.
+    fn watch_device_list(&mut self) {
+        let changed = {
+            let Some(client) = self.client.as_ref() else {
+                return;
+            };
+            match client.lock() {
+                Ok(mut client) => client.device_list_changed().map_err(|e| e.to_string()),
+                Err(_) => Err("OpenRGB client lock poisoned".to_owned()),
+            }
+        };
+        match changed {
+            Ok(true) => {
+                if self.device_list.announce(Instant::now()) {
+                    info!(settle = ?DEVICE_LIST_SETTLE, "OpenRGB announced a device-list change");
+                }
+            }
+            Ok(false) => {}
+            Err(error) => {
+                error!(%error, "OpenRGB connection lost; reconnecting");
+                self.disconnect();
+            }
         }
     }
 
@@ -197,7 +278,7 @@ impl Runtime {
                 // set depends on the configuration (aliases, selectors) and
                 // on what the server reports now, which `argb devices scan`
                 // may just have changed. Reconnecting over loopback is cheap.
-                self.engine = None;
+                self.disconnect();
                 self.last_connect_attempt = None;
             }
             Err(error) => {
@@ -209,8 +290,9 @@ impl Runtime {
     fn connect(&mut self) {
         self.last_connect_attempt = Some(Instant::now());
         match self.build_engine() {
-            Ok(engine) => {
+            Ok((engine, client)) => {
                 self.engine = Some(engine);
+                self.client = Some(client);
                 self.apply();
             }
             Err(error) => {
@@ -219,24 +301,33 @@ impl Runtime {
         }
     }
 
-    fn build_engine(&self) -> anyhow::Result<OpenRgbEngine> {
+    /// Drops the engine and its connection; the next poll reconnects when
+    /// due. Any pending device-list rebuild goes with it, since the new
+    /// connection starts from the server's current list anyway.
+    fn disconnect(&mut self) {
+        self.engine = None;
+        self.client = None;
+        self.device_list = DeviceListWatch::default();
+    }
+
+    fn build_engine(&self) -> anyhow::Result<(OpenRgbEngine, SharedClient<OpenRgbClient>)> {
         let settings = &self.config.openrgb;
         let profile = self.config.to_profile();
-        let devices = open_devices(&settings.host, settings.port, CLIENT_NAME, &profile)
+        let session = open_session(&settings.host, settings.port, CLIENT_NAME, &profile)
             .with_context(|| {
                 format!(
                     "connecting to OpenRGB at {}:{}",
                     settings.host, settings.port
                 )
             })?;
-        if !any_configured(&profile, devices.iter().map(LightingDevice::alias)) {
+        if !any_configured(&profile, session.devices.iter().map(LightingDevice::alias)) {
             anyhow::bail!(
                 "OpenRGB lists {} controller(s), none matching the {} configured device(s)",
-                devices.len(),
+                session.devices.len(),
                 profile.devices.len()
             );
         }
-        Ok(Engine::new(profile, devices))
+        Ok((Engine::new(profile, session.devices), session.client))
     }
 
     fn apply(&mut self) {
@@ -257,7 +348,7 @@ impl Runtime {
             .any(|error| matches!(error, DeviceError::Backend { .. }))
         {
             error!("OpenRGB connection lost; reconnecting");
-            self.engine = None;
+            self.disconnect();
         }
     }
 }
@@ -316,6 +407,24 @@ mod tests {
         assert!(runtime.rescan_pending());
         runtime.enter_state(PowerState::Active);
         assert!(runtime.rescan_pending());
+    }
+
+    #[test]
+    fn device_list_announcements_settle_after_a_quiet_period() {
+        let quiet = Duration::from_secs(3);
+        let t0 = Instant::now();
+        let mut watch = DeviceListWatch::default();
+        assert!(!watch.take_settled(t0, quiet));
+
+        assert!(watch.announce(t0));
+        assert!(!watch.take_settled(t0 + Duration::from_secs(2), quiet));
+        // A second announcement inside the quiet period restarts it.
+        assert!(!watch.announce(t0 + Duration::from_secs(2)));
+        assert!(!watch.take_settled(t0 + Duration::from_secs(4), quiet));
+        assert!(watch.take_settled(t0 + Duration::from_secs(5), quiet));
+        // Settling clears the pending rebuild.
+        assert!(!watch.take_settled(t0 + Duration::from_secs(60), quiet));
+        assert!(watch.announce(t0 + Duration::from_secs(60)));
     }
 
     #[test]

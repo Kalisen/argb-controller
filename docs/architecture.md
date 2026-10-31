@@ -94,8 +94,9 @@ stateDiagram-v2
     classDef off fill:#F6E7C1,stroke:#8A6D1D,color:#3D2F05
 
     [*] --> Active: service start
+    Active --> Active: OpenRGB device list changed<br/>quiet 3 s, rebuild, reapply
     Active --> Sleep: PBT_APMSUSPEND<br/>apply sleep lighting<br/>(hardware modes, saved)<br/>handler blocks until done
-    Sleep --> Active: PBT_APMRESUMEAUTOMATIC<br/>wait 2 s, apply active lighting
+    Sleep --> Active: PBT_APMRESUMEAUTOMATIC<br/>wait 2 s, apply active lighting<br/>+15 s re-detect, rebuild, reapply
     Active --> [*]: SERVICE_CONTROL_PRESHUTDOWN<br/>apply [boot] follow state<br/>(hardware modes, saved)
 
     class Active on
@@ -122,6 +123,20 @@ so the re-detection counts as finished when announcements have stopped for
 configured devices, it is dropped and the service retries every 5 s. On pre-shutdown (or shutdown, when pre-shutdown
 is not delivered) it applies the state named by `[boot] follow`, again
 unattended and saved, so that POST shows it.
+
+The service also reads the notifications OpenRGB sends on the engine's own
+connection at every poll (at least twice a second). A device-list
+announcement from any cause starts the same 3 s quiet period, after which
+the engine is dropped and rebuilt on the current list and the state
+reapplied. The case that demanded it is boot: the two services start in the
+same second, the service connects two seconds later, and on the first boot
+test OpenRGB was still detecting and listed two of the five controllers (the
+RAM sticks). An engine built on that list drove the RAM and nothing else,
+and the board showed its firmware lighting until the next sleep cycle. The
+same path covers a rescan from the OpenRGB UI and a controller plugged in
+while the service runs. A list that maps none of the configured devices is
+still refused as above, so the service does not settle on the empty list
+that detection starts from.
 
 The engine's `Attendance` captures the distinction: attended applies may use
 the synchronized software pulse; unattended applies use each device's own
