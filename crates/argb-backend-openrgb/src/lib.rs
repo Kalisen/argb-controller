@@ -21,4 +21,4 @@ pub use client::{ControllerCommands, OpenRgbClient, OpenRgbError};
 pub use description::{ControllerDescription, ModeDescription};
 pub use device::{ModeMap, OpenRgbDevice, SharedClient};
 pub use discovery::{Assignment, NewDevice, assign_aliases, new_devices};
-pub use session::open_devices;
+pub use session::{OpenRgbSession, open_devices, open_session};

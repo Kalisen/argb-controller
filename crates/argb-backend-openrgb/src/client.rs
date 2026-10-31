@@ -94,6 +94,9 @@ pub trait ControllerCommands {
 pub struct OpenRgbClient {
     stream: TcpStream,
     protocol_version: u32,
+    /// Whether a device-list announcement was skipped while a reply was
+    /// awaited, so that [`Self::device_list_changed`] can still report it.
+    list_changed: bool,
 }
 
 impl OpenRgbClient {
@@ -110,6 +113,7 @@ impl OpenRgbClient {
         let mut client = Self {
             stream,
             protocol_version: 0,
+            list_changed: false,
         };
         client.negotiate_protocol()?;
         client.set_client_name(client_name)?;
@@ -179,7 +183,7 @@ impl OpenRgbClient {
         timeout: Duration,
         quiet_period: Duration,
     ) -> Result<bool, OpenRgbError> {
-        self.send(SERVER_DEVICE_INDEX, PacketId::RequestRescanDevices, &[])?;
+        self.request_rescan()?;
         let deadline = Instant::now() + timeout;
         let mut announced = false;
         loop {
@@ -204,6 +208,49 @@ impl OpenRgbClient {
                     debug!("rescan went quiet with an empty device list; still waiting");
                 }
             }
+        }
+    }
+
+    /// Asks the server to detect hardware again without waiting for it.
+    fn request_rescan(&mut self) -> Result<(), OpenRgbError> {
+        self.send(SERVER_DEVICE_INDEX, PacketId::RequestRescanDevices, &[])
+    }
+
+    /// Whether the server has announced a changed device list since the
+    /// last call. Never blocks: it reads the notifications waiting on the
+    /// socket and also counts one skipped while a reply was awaited.
+    ///
+    /// The server announces to every client when its list changes: while it
+    /// is still detecting hardware as a client connects (the case at boot,
+    /// when the service and OpenRGB start together), on a rescan from its own
+    /// UI, and when a hot-pluggable controller appears or disappears.
+    ///
+    /// # Errors
+    /// [`OpenRgbError`] when the connection failed or the server sent a
+    /// reply nothing asked for.
+    pub fn device_list_changed(&mut self) -> Result<bool, OpenRgbError> {
+        let mut changed = std::mem::take(&mut self.list_changed);
+        while let Some(packet) = self.poll_notification()? {
+            if packet == PacketId::DeviceListUpdated {
+                changed = true;
+            }
+        }
+        Ok(changed)
+    }
+
+    /// Reads one server notification if a packet is already waiting on the
+    /// socket; returns `None` without blocking otherwise.
+    fn poll_notification(&mut self) -> Result<Option<PacketId>, OpenRgbError> {
+        self.stream.set_nonblocking(true)?;
+        let mut header_bytes = [0u8; HEADER_LEN];
+        let peeked = self.stream.peek(&mut header_bytes);
+        self.stream.set_nonblocking(false)?;
+        match peeked {
+            Ok(0) => Err(std::io::Error::from(std::io::ErrorKind::UnexpectedEof).into()),
+            // Part of a packet is waiting; read all of it with the usual timeout.
+            Ok(_) => self.read_notification(IO_TIMEOUT),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => Ok(None),
+            Err(error) => Err(error.into()),
         }
     }
 
@@ -328,7 +375,10 @@ impl OpenRgbClient {
                 return Ok(payload);
             }
             if header.packet_id.is_unsolicited() {
-                debug!(packet = ?header.packet_id, "ignoring unsolicited packet");
+                debug!(packet = ?header.packet_id, "skipping unsolicited packet");
+                if header.packet_id == PacketId::DeviceListUpdated {
+                    self.list_changed = true;
+                }
                 continue;
             }
             return Err(OpenRgbError::UnexpectedPacket {
@@ -605,6 +655,38 @@ mod tests {
                 .rescan_with_quiet_period(Duration::from_millis(100), TEST_QUIET)
                 .unwrap()
         );
+        drop(client);
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn device_list_changes_are_reported_once_without_blocking() {
+        let script = vec![(0, PacketId::DeviceListUpdated)];
+        let (addr, server) =
+            fake_server_scripted(MAX_PROTOCOL_VERSION, vec![sample_controller()], script);
+        let mut client = connect(addr);
+        assert!(!client.device_list_changed().unwrap());
+
+        client.request_rescan().unwrap();
+        thread::sleep(Duration::from_millis(100));
+        let started = Instant::now();
+        assert!(client.device_list_changed().unwrap());
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert!(!client.device_list_changed().unwrap());
+
+        assert_eq!(client.controller_count().unwrap(), 1);
+        drop(client);
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn a_device_list_change_skipped_while_awaiting_a_reply_is_still_reported() {
+        // The fake server sends a device-list announcement before every count reply.
+        let (addr, server) = fake_server(MAX_PROTOCOL_VERSION, vec![sample_controller()]);
+        let mut client = connect(addr);
+        assert_eq!(client.controller_count().unwrap(), 1);
+        assert!(client.device_list_changed().unwrap());
+        assert!(!client.device_list_changed().unwrap());
         drop(client);
         server.join().unwrap();
     }

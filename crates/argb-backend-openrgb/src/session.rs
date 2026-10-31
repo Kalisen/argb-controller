@@ -6,13 +6,20 @@ use argb_domain::LightingProfile;
 use tracing::info;
 
 use crate::client::{OpenRgbClient, OpenRgbError};
-use crate::device::OpenRgbDevice;
+use crate::device::{OpenRgbDevice, SharedClient};
 use crate::discovery::assign_aliases;
 
-/// Connects to the server at `host:port` as `client_name`, lists its
-/// controllers and wraps each as a device under the alias the profile gives
-/// it (or a derived one). The service and the CLI share this so they drive
-/// the same device set.
+/// A connection and the devices built on it.
+pub struct OpenRgbSession {
+    /// The connection every device writes through. The service also reads
+    /// server notifications from it between writes.
+    pub client: SharedClient<OpenRgbClient>,
+    /// One device per controller the server listed when the session opened.
+    pub devices: Vec<OpenRgbDevice<OpenRgbClient>>,
+}
+
+/// Like [`open_session`], returning only the devices. For callers that
+/// never need the connection itself.
 ///
 /// # Errors
 /// [`OpenRgbError`] when the server is unreachable or answers badly.
@@ -22,6 +29,22 @@ pub fn open_devices(
     client_name: &str,
     profile: &LightingProfile,
 ) -> Result<Vec<OpenRgbDevice<OpenRgbClient>>, OpenRgbError> {
+    open_session(host, port, client_name, profile).map(|session| session.devices)
+}
+
+/// Connects to the server at `host:port` as `client_name`, lists its
+/// controllers and wraps each as a device under the alias the profile gives
+/// it (or a derived one). The service and the CLI share this so they drive
+/// the same device set.
+///
+/// # Errors
+/// [`OpenRgbError`] when the server is unreachable or answers badly.
+pub fn open_session(
+    host: &str,
+    port: u16,
+    client_name: &str,
+    profile: &LightingProfile,
+) -> Result<OpenRgbSession, OpenRgbError> {
     let mut client = OpenRgbClient::connect(host, port, client_name)?;
     let controllers = client.controllers()?;
     let client = Arc::new(Mutex::new(client));
@@ -44,5 +67,5 @@ pub fn open_devices(
             )
         })
         .collect();
-    Ok(devices)
+    Ok(OpenRgbSession { client, devices })
 }
