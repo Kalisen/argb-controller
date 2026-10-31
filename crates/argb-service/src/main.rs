@@ -6,7 +6,8 @@
 mod runtime;
 
 use std::path::PathBuf;
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::mpsc::{self, Receiver, Sender, SyncSender};
+use std::time::Duration;
 
 use argb_config::{ConfigStore, paths};
 use argb_domain::PowerState;
@@ -23,12 +24,21 @@ const CONSOLE_FLAG: &str = "--console";
 /// Flag naming the configuration file; defaults to the machine-wide file.
 const CONFIG_FLAG: &str = "--config";
 
+/// Longest time the suspend handler blocks while the sleep lighting is
+/// written. Windows expects power-event handlers to return promptly; two
+/// seconds is the documented budget for applications.
+const SUSPEND_APPLY_BUDGET: Duration = Duration::from_millis(1800);
+
 /// Commands delivered to the run loop.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug)]
 enum Command {
-    /// Move devices to the lighting for `PowerState`.
-    EnterState(PowerState),
-    /// Shut the loop down.
+    /// Move devices to the lighting for `PowerState`. When a sender is
+    /// given, the loop signals it once the devices are updated, so that a
+    /// control handler can block until the sleep lighting is on.
+    EnterState(PowerState, Option<SyncSender<()>>),
+    /// Write the boot lighting to device memory, then stop.
+    Shutdown,
+    /// Shut the loop down without touching the devices.
     Stop,
 }
 
@@ -91,7 +101,17 @@ fn run_loop(rx: &Receiver<Command>, config_path: PathBuf) -> anyhow::Result<()> 
     loop {
         runtime.poll();
         match rx.recv_timeout(runtime.wait_interval()) {
-            Ok(Command::EnterState(state)) => runtime.enter_state(state),
+            Ok(Command::EnterState(state, done)) => {
+                runtime.enter_state(state);
+                if let Some(done) = done {
+                    let _ = done.try_send(());
+                }
+            }
+            Ok(Command::Shutdown) => {
+                runtime.prepare_for_shutdown();
+                info!("stopping after shutdown notification");
+                return Ok(());
+            }
             Ok(Command::Stop) => {
                 info!("stopping");
                 return Ok(());
@@ -142,7 +162,7 @@ mod service {
     };
     use windows_service::service_control_handler::{self, ServiceControlHandlerResult};
 
-    use super::{Command, SERVICE_NAME, run_loop};
+    use super::{Command, SERVICE_NAME, SUSPEND_APPLY_BUDGET, run_loop};
 
     /// Configuration path handed over from `main`, since the dispatcher
     /// calls `service_main` without our arguments.
@@ -158,17 +178,29 @@ mod service {
         let handler = move |control: ServiceControl| -> ServiceControlHandlerResult {
             match control {
                 ServiceControl::Interrogate => ServiceControlHandlerResult::NoError,
-                ServiceControl::Stop | ServiceControl::Shutdown => {
+                ServiceControl::Stop => {
                     let _ = tx.send(Command::Stop);
+                    ServiceControlHandlerResult::NoError
+                }
+                // Preshutdown arrives first and with a generous budget; a
+                // plain Shutdown is the fallback when preshutdown is not
+                // delivered. Both write the boot lighting, then stop.
+                ServiceControl::Preshutdown | ServiceControl::Shutdown => {
+                    let _ = tx.send(Command::Shutdown);
                     ServiceControlHandlerResult::NoError
                 }
                 ServiceControl::PowerEvent(event) => {
                     match event {
                         PowerEventParam::Suspend => {
-                            let _ = tx.send(Command::EnterState(PowerState::Sleep));
+                            // Block until the sleep lighting is on the
+                            // devices (or the budget runs out): once this
+                            // handler returns, Windows may cut power.
+                            let (done_tx, done_rx) = mpsc::sync_channel(1);
+                            let _ = tx.send(Command::EnterState(PowerState::Sleep, Some(done_tx)));
+                            let _ = done_rx.recv_timeout(SUSPEND_APPLY_BUDGET);
                         }
                         PowerEventParam::ResumeAutomatic | PowerEventParam::ResumeSuspend => {
-                            let _ = tx.send(Command::EnterState(PowerState::Active));
+                            let _ = tx.send(Command::EnterState(PowerState::Active, None));
                         }
                         _ => {}
                     }
@@ -192,6 +224,7 @@ mod service {
         status_handle.set_service_status(report(
             ServiceState::Running,
             ServiceControlAccept::STOP
+                | ServiceControlAccept::PRESHUTDOWN
                 | ServiceControlAccept::SHUTDOWN
                 | ServiceControlAccept::POWER_EVENT,
         ))?;

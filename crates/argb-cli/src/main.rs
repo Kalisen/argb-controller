@@ -10,10 +10,11 @@ use std::time::Duration;
 use anyhow::{Context, bail};
 use argb_backend_openrgb::protocol::{ColorMode, mode_flags};
 use argb_backend_openrgb::{
-    ControllerDescription, ModeMap, OpenRgbClient, assign_aliases, new_devices,
+    ControllerDescription, ModeMap, OpenRgbClient, assign_aliases, new_devices, open_devices,
 };
 use argb_config::{ConfigError, ConfigFile, ConfigStore, DeviceSchema, OpenRgbSettings, paths};
 use argb_domain::{Backend, Brightness, DeviceAlias, LightingMode, PowerState, PulsePeriod, Rgb};
+use argb_engine::{Attendance, Engine, LightingDevice, Persist};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
 #[derive(Parser)]
@@ -46,7 +47,34 @@ enum TopCommand {
         #[command(subcommand)]
         command: DevicesCommand,
     },
+    /// Put every device into its lighting for a power state, the way the
+    /// service does when no host will keep driving them (hardware effects
+    /// only). Useful to preview the sleep or boot lighting.
+    Apply {
+        /// Power state to show.
+        #[arg(value_enum)]
+        state: StateArg,
+        /// Store the modes in device memory regardless of the `[boot] follow`
+        /// policy.
+        #[arg(long)]
+        save: bool,
+    },
+    /// Write a distinct color per device to device memory, so that a cold
+    /// boot reveals which devices keep their lighting.
+    ProbePersistence,
 }
+
+/// Colors used by `probe-persistence`, assigned to devices in list order.
+const PROBE_PALETTE: [(&str, Rgb); 8] = [
+    ("red", Rgb::new(255, 0, 0)),
+    ("green", Rgb::new(0, 255, 0)),
+    ("blue", Rgb::new(0, 0, 255)),
+    ("yellow", Rgb::new(255, 255, 0)),
+    ("magenta", Rgb::new(255, 0, 255)),
+    ("cyan", Rgb::new(0, 255, 255)),
+    ("white", Rgb::WHITE),
+    ("orange", Rgb::new(255, 106, 0)),
+];
 
 #[derive(Subcommand)]
 enum DevicesCommand {
@@ -222,6 +250,93 @@ fn main() -> anyhow::Result<()> {
     match cli.command {
         TopCommand::Config { command } => run_config(&store, command),
         TopCommand::Devices { command } => run_devices(&store, &command),
+        TopCommand::Apply { state, save } => apply_state(&store, state.into(), save),
+        TopCommand::ProbePersistence => probe_persistence(&store),
+    }
+}
+
+fn load_or_starter(store: &ConfigStore) -> anyhow::Result<ConfigFile> {
+    if store.exists() {
+        Ok(store.load()?)
+    } else {
+        Ok(ConfigFile::starter())
+    }
+}
+
+fn apply_state(store: &ConfigStore, state: PowerState, save: bool) -> anyhow::Result<()> {
+    let config = load_or_starter(store)?;
+    let profile = config.to_profile();
+    let devices = open_devices(
+        &config.openrgb.host,
+        config.openrgb.port,
+        CLIENT_NAME,
+        &profile,
+    )
+    .with_context(|| {
+        format!(
+            "connecting to OpenRGB at {}:{}",
+            config.openrgb.host, config.openrgb.port
+        )
+    })?;
+    let persist = if save {
+        Persist::SaveToDevice
+    } else {
+        Persist::for_state(state, config.boot.follow)
+    };
+    let mut engine = Engine::new(profile, devices);
+    let errors = engine.apply_state(state, persist, Attendance::Unattended);
+    for error in &errors {
+        eprintln!("{error}");
+    }
+    println!(
+        "applied {state} lighting ({persist:?}) to {} device(s), {} failed",
+        engine.devices().len(),
+        errors.len()
+    );
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        bail!("some devices did not take the state")
+    }
+}
+
+fn probe_persistence(store: &ConfigStore) -> anyhow::Result<()> {
+    let config = load_or_starter(store)?;
+    let profile = config.to_profile();
+    let mut devices = open_devices(
+        &config.openrgb.host,
+        config.openrgb.port,
+        CLIENT_NAME,
+        &profile,
+    )
+    .with_context(|| {
+        format!(
+            "connecting to OpenRGB at {}:{}",
+            config.openrgb.host, config.openrgb.port
+        )
+    })?;
+    println!("{:<34}{:<10}hex", "alias", "color");
+    let mut failures = 0;
+    for (i, device) in devices.iter_mut().enumerate() {
+        let (name, color) = PROBE_PALETTE[i % PROBE_PALETTE.len()];
+        match device.apply_static(color, Brightness::MAX, Persist::SaveToDevice) {
+            Ok(()) => println!("{:<34}{:<10}{}", device.alias(), name, color.to_hex()),
+            Err(error) => {
+                failures += 1;
+                println!("{:<34}{:<10}{error}", device.alias(), "FAILED");
+            }
+        }
+    }
+    println!();
+    println!("Now shut Windows down fully and power the machine back on. With Fast Startup");
+    println!("enabled, use 'shutdown /s /t 0' or hold Shift while clicking Shut down, since a");
+    println!("regular shutdown hibernates the kernel and keeps the lighting state in RAM.");
+    println!("During POST, note which device shows its color above: those keep their lighting");
+    println!("in their own memory and are safe to rely on for boot lighting.");
+    if failures == 0 {
+        Ok(())
+    } else {
+        bail!("{failures} device(s) failed to take the probe color")
     }
 }
 

@@ -10,5 +10,5 @@ pub mod engine;
 pub mod pulse;
 
 pub use device::{DeviceError, LightingDevice, Persist};
-pub use engine::Engine;
+pub use engine::{Attendance, Engine};
 pub use pulse::{DEFAULT_TICK_RATE_HZ, PulseWaveform};

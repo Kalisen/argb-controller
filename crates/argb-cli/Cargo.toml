@@ -15,6 +15,7 @@ path = "src/main.rs"
 argb-domain = { workspace = true }
 argb-config = { workspace = true }
 argb-backend-openrgb = { workspace = true }
+argb-engine = { workspace = true }
 anyhow = { workspace = true }
 clap = { workspace = true }
 

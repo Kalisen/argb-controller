@@ -8,6 +8,27 @@ use tracing::{debug, warn};
 use crate::device::{DeviceError, LightingDevice, Persist};
 use crate::pulse::PulseWaveform;
 
+/// Whether a host process will keep driving the devices after the apply.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Attendance {
+    /// The service keeps running: software pulses may be used.
+    Attended,
+    /// The host is about to sleep or shut down, or the caller is a one-shot
+    /// tool: only effects the devices run on their own may be used.
+    Unattended,
+}
+
+impl Attendance {
+    /// The attendance the service has while showing `state`.
+    #[must_use]
+    pub const fn for_state(state: PowerState) -> Self {
+        match state {
+            PowerState::Active => Attendance::Attended,
+            PowerState::Sleep => Attendance::Unattended,
+        }
+    }
+}
+
 /// A device currently driven by the software pulse.
 #[derive(Debug, Clone, Copy)]
 struct SoftwarePulse {
@@ -62,13 +83,19 @@ impl<D: LightingDevice> Engine<D> {
     /// Puts every device into its mode for `state`.
     ///
     /// Static modes always use the hardware static mode. Pulse modes use the
-    /// synchronized software pulse while active (if the device supports
-    /// direct control) and the device's own breathing effect otherwise, since
-    /// nothing can stream frames while the host sleeps.
+    /// synchronized software pulse while attended (if the device supports
+    /// direct control) and the device's own breathing effect otherwise,
+    /// since nothing can stream frames once the host sleeps. A device with
+    /// no breathing effect shows the pulse color statically when unattended.
     ///
     /// Errors are collected rather than aborting, so one failing device does
     /// not leave the others in the previous state.
-    pub fn apply_state(&mut self, state: PowerState, persist: Persist) -> Vec<DeviceError> {
+    pub fn apply_state(
+        &mut self,
+        state: PowerState,
+        persist: Persist,
+        attendance: Attendance,
+    ) -> Vec<DeviceError> {
         self.state = Some(state);
         self.pulsing.clear();
         let mut errors = Vec::new();
@@ -82,8 +109,7 @@ impl<D: LightingDevice> Engine<D> {
                 }
                 LightingMode::Pulse { color, period } => {
                     let caps = device.capabilities();
-                    let prefer_software = state == PowerState::Active && caps.direct;
-                    if prefer_software || (!caps.hardware_pulse && caps.direct) {
+                    if attendance == Attendance::Attended && caps.direct {
                         device.begin_direct().map(|()| {
                             self.pulsing.push(SoftwarePulse {
                                 device_index: index,
@@ -260,7 +286,7 @@ mod tests {
         let mut engine = Engine::new(profile(), devices);
         assert!(
             engine
-                .apply_state(PowerState::Active, Persist::Volatile)
+                .apply_state(PowerState::Active, Persist::Volatile, Attendance::Attended)
                 .is_empty()
         );
         assert!(engine.has_software_pulse());
@@ -278,7 +304,11 @@ mod tests {
         let mut engine = Engine::new(profile(), vec![FakeDevice::new("board", FULL)]);
         assert!(
             engine
-                .apply_state(PowerState::Sleep, Persist::SaveToDevice)
+                .apply_state(
+                    PowerState::Sleep,
+                    Persist::SaveToDevice,
+                    Attendance::Unattended
+                )
                 .is_empty()
         );
         assert!(!engine.has_software_pulse());
@@ -289,7 +319,7 @@ mod tests {
     }
 
     #[test]
-    fn sleep_pulse_falls_back_to_direct_then_static() {
+    fn unattended_pulse_without_hardware_effect_shows_the_color_statically() {
         let devices = vec![
             FakeDevice::new("ram", DIRECT_ONLY),
             FakeDevice::new("lamp", STATIC_ONLY),
@@ -297,13 +327,28 @@ mod tests {
         let mut engine = Engine::new(profile(), devices);
         assert!(
             engine
-                .apply_state(PowerState::Sleep, Persist::Volatile)
+                .apply_state(PowerState::Sleep, Persist::Volatile, Attendance::Unattended)
                 .is_empty()
         );
-        assert_eq!(engine.devices()[0].calls, vec![Call::BeginDirect]);
+        for device in engine.devices() {
+            assert_eq!(
+                device.calls,
+                vec![Call::Static(RED, Brightness::MAX, Persist::Volatile)]
+            );
+        }
+    }
+
+    #[test]
+    fn attended_active_state_without_direct_uses_the_hardware_pulse() {
+        let no_direct = DeviceCapabilities {
+            direct: false,
+            ..FULL
+        };
+        let mut engine = Engine::new(profile(), vec![FakeDevice::new("board", no_direct)]);
+        engine.apply_state(PowerState::Active, Persist::Volatile, Attendance::Attended);
         assert_eq!(
-            engine.devices()[1].calls,
-            vec![Call::Static(RED, Brightness::MAX, Persist::Volatile)]
+            engine.devices()[0].calls,
+            vec![Call::HardwarePulse(TURQUOISE, period(), Persist::Volatile)]
         );
     }
 
@@ -312,7 +357,11 @@ mod tests {
         let mut engine = Engine::new(profile(), vec![FakeDevice::new("gpu", FULL)]);
         assert!(
             engine
-                .apply_state(PowerState::Active, Persist::SaveToDevice)
+                .apply_state(
+                    PowerState::Active,
+                    Persist::SaveToDevice,
+                    Attendance::Attended
+                )
                 .is_empty()
         );
         assert_eq!(
@@ -329,9 +378,9 @@ mod tests {
     #[test]
     fn state_change_clears_previous_pulses() {
         let mut engine = Engine::new(profile(), vec![FakeDevice::new("board", FULL)]);
-        engine.apply_state(PowerState::Active, Persist::Volatile);
+        engine.apply_state(PowerState::Active, Persist::Volatile, Attendance::Attended);
         assert!(engine.has_software_pulse());
-        engine.apply_state(PowerState::Sleep, Persist::Volatile);
+        engine.apply_state(PowerState::Sleep, Persist::Volatile, Attendance::Unattended);
         assert!(!engine.has_software_pulse());
         assert_eq!(engine.state(), Some(PowerState::Sleep));
     }
