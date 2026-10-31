@@ -107,12 +107,14 @@ The service accepts `SERVICE_CONTROL_POWEREVENT`, `PRESHUTDOWN` and
 until the run loop reports the devices updated (or 1.8 s pass), because
 Windows may cut power as soon as the handler returns. The sleep profile is
 applied unattended: hardware effects only, saved to device memory. On resume
-the service waits two seconds for OpenRGB and the buses to come back, asks
-OpenRGB to detect its hardware again, reconnects and applies the active
-profile. The re-detection is required: OpenRGB keeps the device handles it
-opened before sleep, and the Gigabyte board's USB controller no longer
-answers on them afterwards, so writes report success while the board shows
-its firmware rainbow. On pre-shutdown (or shutdown, when pre-shutdown
+the service waits two seconds for OpenRGB and the buses to come back and
+applies the active profile, then 15 s later asks OpenRGB to detect its
+hardware again, reconnects and applies once more. The re-detection is
+required: OpenRGB keeps the device handles it opened before sleep, and the
+Gigabyte board's USB controller no longer answers on them afterwards, so
+writes report success while the board shows its firmware rainbow. It must
+not come too early either: a re-detection three seconds after waking left
+every device unresponsive. On pre-shutdown (or shutdown, when pre-shutdown
 is not delivered) it applies the state named by `[boot] follow`, again
 unattended and saved, so that POST shows it.
 
@@ -123,6 +125,11 @@ none. `argb apply <state>` runs an unattended apply from the command line to
 preview the sleep or boot lighting without suspending the machine.
 
 ### Installation
+
+The service has no console, so it logs to a daily file under the `logs`
+directory beside the configuration (seven days kept). The service account
+can write there; everything else in the configuration directory stays
+read-only to it.
 
 `argb service install` copies `argb.exe` and `argb-service.exe` to
 `%ProgramFiles%rgb-controller`, writes a starter configuration when none

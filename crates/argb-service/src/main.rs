@@ -5,13 +5,15 @@
 
 mod runtime;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender, SyncSender};
 use std::time::Duration;
 
 use argb_config::{ConfigStore, paths};
 use argb_domain::PowerState;
 use tracing::{error, info};
+use tracing_appender::non_blocking::WorkerGuard;
+use tracing_appender::rolling::Rotation;
 
 use crate::runtime::Runtime;
 
@@ -35,20 +37,53 @@ enum Command {
     Stop,
 }
 
-fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .init();
+/// File name prefix of the service log; the date and `.log` follow.
+const LOG_FILE_PREFIX: &str = "argb-service";
+/// File name suffix of the service log.
+const LOG_FILE_SUFFIX: &str = "log";
+/// Daily log files kept before the oldest is deleted.
+const LOG_FILES_KEPT: usize = 7;
 
+fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let config_path = config_path_from_args(&args)?;
-    if args.iter().any(|arg| arg == CONSOLE_FLAG) {
+    let console = args.iter().any(|arg| arg == CONSOLE_FLAG);
+    let _log_guard = init_logging(console, &config_path);
+    if console {
         return run_console(config_path);
     }
     run_as_service(config_path)
+}
+
+/// Console mode logs to stdout. Service mode has no console, so it logs to
+/// a daily file under the `logs` directory beside the configuration, keeping
+/// [`LOG_FILES_KEPT`] days; the returned guard flushes the file on exit.
+/// When that directory cannot be written the service runs without a log.
+fn init_logging(console: bool, config_path: &Path) -> Option<WorkerGuard> {
+    let filter = || {
+        tracing_subscriber::EnvFilter::try_from_default_env()
+            .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"))
+    };
+    if console {
+        tracing_subscriber::fmt().with_env_filter(filter()).init();
+        return None;
+    }
+    let dir = paths::log_dir_for(config_path);
+    let appender = tracing_appender::rolling::Builder::new()
+        .rotation(Rotation::DAILY)
+        .filename_prefix(LOG_FILE_PREFIX)
+        .filename_suffix(LOG_FILE_SUFFIX)
+        .max_log_files(LOG_FILES_KEPT)
+        .build(&dir)
+        .ok()?;
+    let (writer, guard) = tracing_appender::non_blocking(appender);
+    tracing_subscriber::fmt()
+        .with_env_filter(filter())
+        .with_ansi(false)
+        .with_writer(writer)
+        .init();
+    info!(dir = %dir.display(), "logging to file");
+    Some(guard)
 }
 
 /// The value following `--config`, or the default path.
