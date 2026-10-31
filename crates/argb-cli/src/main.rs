@@ -7,7 +7,8 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use anyhow::{Context, bail};
-use argb_backend_openrgb::{ModeMap, OpenRgbClient, assign_aliases};
+use argb_backend_openrgb::protocol::{ColorMode, mode_flags};
+use argb_backend_openrgb::{ControllerDescription, ModeMap, OpenRgbClient, assign_aliases};
 use argb_config::{ConfigError, ConfigFile, ConfigStore, DeviceSchema, OpenRgbSettings, paths};
 use argb_domain::{Backend, Brightness, DeviceAlias, LightingMode, PowerState, PulsePeriod, Rgb};
 use clap::{Args, Parser, Subcommand, ValueEnum};
@@ -48,6 +49,12 @@ enum TopCommand {
 enum DevicesCommand {
     /// List the controllers OpenRGB reports and the alias each one maps to.
     List,
+    /// Print everything OpenRGB reports about one controller: modes with
+    /// their flags and ranges, zones and LED count.
+    Show {
+        /// Controller index as printed by `devices list`.
+        index: u32,
+    },
 }
 
 #[derive(Subcommand)]
@@ -198,22 +205,95 @@ fn main() -> anyhow::Result<()> {
 }
 
 fn run_devices(store: &ConfigStore, command: &DevicesCommand) -> anyhow::Result<()> {
-    let DevicesCommand::List = command;
     let config = if store.exists() {
         store.load()?
     } else {
         ConfigFile::starter()
     };
-    list_devices(&config)
+    match command {
+        DevicesCommand::List => list_devices(&config),
+        DevicesCommand::Show { index } => show_device(&config, *index),
+    }
+}
+
+fn connect(config: &ConfigFile) -> anyhow::Result<OpenRgbClient> {
+    let OpenRgbSettings { host, port } = &config.openrgb;
+    OpenRgbClient::connect(host, *port, CLIENT_NAME).with_context(|| {
+        format!("connecting to OpenRGB at {host}:{port}; is the SDK server enabled?")
+    })
+}
+
+fn show_device(config: &ConfigFile, index: u32) -> anyhow::Result<()> {
+    let mut client = connect(config)?;
+    let count = client.controller_count()?;
+    if index >= count {
+        bail!("controller index {index} is out of range; OpenRGB reports {count} controllers");
+    }
+    let controller = client.controller(index)?;
+    print_controller(index, &controller);
+    Ok(())
+}
+
+fn print_controller(index: u32, controller: &ControllerDescription) {
+    let modes = ModeMap::analyze(controller);
+    let caps = modes.capabilities(controller);
+    println!("controller {index}: {}", controller.name);
+    println!(
+        "  type: {}  vendor: {}  version: {}",
+        controller.device_type, controller.vendor, controller.version
+    );
+    println!("  description: {}", controller.description);
+    println!(
+        "  location: {}  serial: {}",
+        controller.location, controller.serial
+    );
+    println!(
+        "  leds: {}  active mode: {}",
+        controller.led_count(),
+        controller.active_mode
+    );
+    println!("  capabilities: {caps:?}");
+    println!(
+        "  roles: direct={:?} static={:?} pulse={:?}",
+        modes.direct, modes.static_mode, modes.pulse
+    );
+    println!("  modes:");
+    for (i, mode) in controller.modes.iter().enumerate() {
+        let color_mode = ColorMode::from_raw(mode.color_mode)
+            .map_or_else(|| mode.color_mode.to_string(), |m| format!("{m:?}"));
+        println!(
+            "    [{i}] {:<16} value={} flags=[{}] speed={}..{} (now {}) brightness={}..{} (now {}) colors={}..{} color_mode={color_mode}",
+            mode.name,
+            mode.value,
+            mode_flags::describe(mode.flags),
+            mode.speed_min,
+            mode.speed_max,
+            mode.speed,
+            mode.brightness_min,
+            mode.brightness_max,
+            mode.brightness,
+            mode.colors_min,
+            mode.colors_max,
+        );
+    }
+    println!("  zones:");
+    for (i, zone) in controller.zones.iter().enumerate() {
+        println!(
+            "    [{i}] {:<16} type={} leds={} ({}..{}) segments={}",
+            zone.name,
+            zone.zone_type,
+            zone.leds_count,
+            zone.leds_min,
+            zone.leds_max,
+            zone.segments.len()
+        );
+    }
 }
 
 /// Prints one line per controller: index, alias (marked `*` when it comes
 /// from the configuration), device type, capabilities and reported name.
 fn list_devices(config: &ConfigFile) -> anyhow::Result<()> {
-    let OpenRgbSettings { host, port } = &config.openrgb;
-    let mut client = OpenRgbClient::connect(host, *port, CLIENT_NAME).with_context(|| {
-        format!("connecting to OpenRGB at {host}:{port}; is the SDK server enabled?")
-    })?;
+    let mut client = connect(config)?;
     let controllers = client.controllers()?;
     let profile = config.to_profile();
 

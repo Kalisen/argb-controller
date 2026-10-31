@@ -101,7 +101,7 @@ impl From<DeviceAlias> for String {
 
 impl std::fmt::Display for DeviceAlias {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
+        f.pad(&self.0)
     }
 }
 

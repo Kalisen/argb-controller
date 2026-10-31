@@ -212,6 +212,31 @@ pub mod mode_flags {
     pub const MANUAL_SAVE: u32 = 1 << 8;
     /// The controller stores the mode whenever it changes.
     pub const AUTOMATIC_SAVE: u32 = 1 << 9;
+
+    /// Every known flag with its name, in bit order.
+    pub const NAMES: [(u32, &str); 10] = [
+        (HAS_SPEED, "speed"),
+        (HAS_DIRECTION_LR, "dir-lr"),
+        (HAS_DIRECTION_UD, "dir-ud"),
+        (HAS_DIRECTION_HV, "dir-hv"),
+        (HAS_BRIGHTNESS, "brightness"),
+        (HAS_PER_LED_COLOR, "per-led-color"),
+        (HAS_MODE_SPECIFIC_COLOR, "mode-color"),
+        (HAS_RANDOM_COLOR, "random-color"),
+        (MANUAL_SAVE, "manual-save"),
+        (AUTOMATIC_SAVE, "auto-save"),
+    ];
+
+    /// Names of the flags set in `flags`, comma separated, for diagnostics.
+    #[must_use]
+    pub fn describe(flags: u32) -> String {
+        NAMES
+            .iter()
+            .filter(|(bit, _)| flags & bit != 0)
+            .map(|(_, name)| *name)
+            .collect::<Vec<_>>()
+            .join(",")
+    }
 }
 
 /// How a mode is colored.
@@ -349,7 +374,7 @@ impl std::fmt::Display for DeviceType {
             DeviceType::Monitor => "monitor",
             DeviceType::Unknown => "unknown",
         };
-        f.write_str(name)
+        f.pad(name)
     }
 }
 
