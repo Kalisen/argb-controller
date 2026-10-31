@@ -11,7 +11,7 @@ use std::process::Command;
 use std::time::Duration;
 
 use anyhow::{Context, bail};
-use argb_config::ConfigStore;
+use argb_config::{ConfigStore, paths};
 use argb_service::SERVICE_BINARY_NAME;
 
 /// Directory name under the program files folder that receives the binaries.
@@ -62,6 +62,18 @@ pub fn acl_arguments(dir: &Path) -> Vec<String> {
     ]
 }
 
+/// `icacls` arguments that let the service account write its logs in `dir`,
+/// on top of the restrictions inherited from the configuration directory.
+#[must_use]
+pub fn log_acl_arguments(dir: &Path) -> Vec<String> {
+    vec![
+        dir.display().to_string(),
+        "/grant".into(),
+        format!("{}:(OI)(CI)M", sid::LOCAL_SERVICE),
+        "/Q".into(),
+    ]
+}
+
 /// The default program directory, e.g. `C:\Program Files\argb-controller`.
 #[must_use]
 pub fn default_install_dir() -> PathBuf {
@@ -105,20 +117,26 @@ pub fn prepare_config_dir(store: &ConfigStore) -> anyhow::Result<()> {
         .path()
         .parent()
         .context("configuration path has no directory")?;
-    let status = Command::new("icacls")
-        .args(acl_arguments(dir))
-        .status()
-        .context("running icacls")?;
-    if !status.success() {
-        bail!(
-            "icacls failed with {status} while restricting {}",
-            dir.display()
-        );
-    }
+    run_icacls(acl_arguments(dir), dir)?;
     println!(
         "restricted {} to administrators (service account reads)",
         dir.display()
     );
+    let log_dir = paths::log_dir_for(store.path());
+    std::fs::create_dir_all(&log_dir).with_context(|| format!("creating {}", log_dir.display()))?;
+    run_icacls(log_acl_arguments(&log_dir), &log_dir)?;
+    println!("service logs go to {}", log_dir.display());
+    Ok(())
+}
+
+fn run_icacls(args: Vec<String>, dir: &Path) -> anyhow::Result<()> {
+    let status = Command::new("icacls")
+        .args(args)
+        .status()
+        .context("running icacls")?;
+    if !status.success() {
+        bail!("icacls failed with {status} on {}", dir.display());
+    }
     Ok(())
 }
 
@@ -549,6 +567,15 @@ mod tests {
         assert!(args.contains(&"*S-1-5-19:(OI)(CI)RX".to_owned()));
         assert!(args.contains(&"*S-1-5-32-545:(OI)(CI)RX".to_owned()));
         assert!(!args.iter().any(|a| a.contains("S-1-5-32-545:(OI)(CI)F")));
+    }
+
+    #[test]
+    fn log_acl_grants_the_service_account_modify_without_resetting() {
+        let args = log_acl_arguments(Path::new(r"C:\ProgramData\argb-controller\logs"));
+        assert_eq!(args[0], r"C:\ProgramData\argb-controller\logs");
+        assert!(args.contains(&"*S-1-5-19:(OI)(CI)M".to_owned()));
+        assert!(!args.iter().any(|a| a.starts_with("/inheritance")));
+        assert!(!args.iter().any(|a| a == "/grant:r"));
     }
 
     #[test]

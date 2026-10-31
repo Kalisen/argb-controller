@@ -23,6 +23,10 @@ pub const IDLE_INTERVAL: Duration = Duration::from_millis(500);
 /// Pause after the host wakes before devices are driven again, so that
 /// OpenRGB and the buses underneath it have re-initialized.
 pub const RESUME_SETTLE: Duration = Duration::from_secs(2);
+/// Delay after a resume before OpenRGB is asked to detect its hardware
+/// again. A re-detection three seconds after waking left every device
+/// unresponsive; the buses need longer than the first write does.
+pub const RESUME_RESCAN_DELAY: Duration = Duration::from_secs(15);
 /// Longest wait for OpenRGB to finish detecting hardware again after a resume.
 pub const RESUME_RESCAN_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -37,6 +41,8 @@ pub struct Runtime {
     engine: Option<OpenRgbEngine>,
     last_connect_attempt: Option<Instant>,
     desired_state: PowerState,
+    /// When the post-resume re-detection is due, if one is pending.
+    rescan_due: Option<Instant>,
     clock: Instant,
 }
 
@@ -55,23 +61,23 @@ impl Runtime {
             engine: None,
             last_connect_attempt: None,
             desired_state: initial_state,
+            rescan_due: None,
             clock: Instant::now(),
         }
     }
 
     /// Moves every device to `state`. Entering the active state from sleep
-    /// waits [`RESUME_SETTLE`], has OpenRGB detect its hardware again and
-    /// rebuilds the engine before applying.
+    /// waits [`RESUME_SETTLE`] first and schedules the re-detection of
+    /// [`RESUME_RESCAN_DELAY`].
     pub fn enter_state(&mut self, state: PowerState) {
         info!(%state, "entering state");
         let resuming = state == PowerState::Active && self.desired_state == PowerState::Sleep;
         self.desired_state = state;
         if resuming {
             std::thread::sleep(RESUME_SETTLE);
-            self.rescan_after_resume();
-        } else {
-            self.apply();
         }
+        self.apply();
+        self.rescan_due = resuming.then(|| Instant::now() + RESUME_RESCAN_DELAY);
     }
 
     /// Makes OpenRGB detect its hardware again, then reconnects so the
@@ -130,6 +136,10 @@ impl Runtime {
         }
         if self.engine.is_none() && self.reconnect_due() {
             self.connect();
+        }
+        if self.rescan_due.is_some_and(|due| due <= Instant::now()) {
+            self.rescan_due = None;
+            self.rescan_after_resume();
         }
     }
 

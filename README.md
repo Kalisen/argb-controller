@@ -19,8 +19,10 @@ server enabled on the loopback interface.
 From an elevated prompt, after `cargo build --release`:
 
 ```
-targeteleasergb.exe service install
-targeteleasergb.exe service check
+target
+eleasergb.exe service install
+target
+eleasergb.exe service check
 ```
 
 This copies the binaries to `%ProgramFiles%rgb-controller`, writes a starter
@@ -32,7 +34,8 @@ argb devices scan
 argb config set-default --state active --mode static --color "#40E0D0"
 ```
 
-The service picks up every configuration change within a second. `argb service uninstall`
+The service picks up every configuration change within a second and logs to
+`%ProgramData%\argb-controller\logs`. `argb service uninstall`
 removes the registration and leaves the files.
 
 ## Phases
