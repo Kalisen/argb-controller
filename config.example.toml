@@ -1,0 +1,49 @@
+# argb-controller configuration
+#
+# Copy this file to the service's configuration path and edit it with the
+# `argb config ...` commands (see docs/architecture.md). The CLI takes a lock
+# and writes atomically, so it is safe to drive from scripts.
+
+schema_version = 1
+
+[openrgb]
+# OpenRGB SDK server. Keep it bound to localhost; the SDK has no authentication.
+host = "127.0.0.1"
+port = 6742
+
+[boot]
+# Which state is written to device memory so that it shows during POST and
+# the boot sequence, before Windows and this service are running.
+# One of: "active", "sleep".
+follow = "active"
+
+# Defaults applied to every device that has no override for the state.
+[states.active]
+mode = "static"
+color = "#40E0D0"   # turquoise
+brightness = 100    # percent, used as true hardware brightness where supported
+
+[states.sleep]
+mode = "pulse"
+color = "#FF0000"
+period_ms = 4000    # one full dim-bright-dim cycle
+
+# Devices are keyed by an alias of your choice. `match_name` is matched against
+# the device name reported by the backend (case-insensitive substring).
+[devices.motherboard]
+backend = "openrgb"
+match_name = "Gigabyte"
+
+[devices.ram]
+backend = "openrgb"
+match_name = "Vengeance"
+
+[devices.gpu]
+backend = "openrgb"
+match_name = "TUF"
+
+# Per-device override for one state. Omitted states fall back to [states.*].
+[devices.gpu.states.sleep]
+mode = "static"
+color = "#000000"
+brightness = 0

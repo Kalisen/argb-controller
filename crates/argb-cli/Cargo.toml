@@ -1,0 +1,21 @@
+[package]
+name = "argb-cli"
+description = "Command-line tool for inspecting and safely editing the argb-controller configuration"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "argb"
+path = "src/main.rs"
+
+[dependencies]
+argb-domain = { workspace = true }
+argb-config = { workspace = true }
+anyhow = { workspace = true }
+clap = { workspace = true }
+
+[lints]
+workspace = true

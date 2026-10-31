@@ -1,0 +1,27 @@
+[package]
+name = "argb-service"
+description = "The argb-controller Windows service: reacts to power events and drives the lighting engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "argb-service"
+path = "src/main.rs"
+
+[dependencies]
+argb-domain = { workspace = true }
+argb-config = { workspace = true }
+argb-engine = { workspace = true }
+argb-backend-openrgb = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+windows-service = { workspace = true }
+
+[lints]
+workspace = true

@@ -1,0 +1,45 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/argb-domain",
+    "crates/argb-config",
+    "crates/argb-engine",
+    "crates/argb-backend-openrgb",
+    "crates/argb-service",
+    "crates/argb-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/Kalisen/argb-controller"
+rust-version = "1.85"
+
+[workspace.dependencies]
+argb-domain = { path = "crates/argb-domain" }
+argb-config = { path = "crates/argb-config" }
+argb-engine = { path = "crates/argb-engine" }
+argb-backend-openrgb = { path = "crates/argb-backend-openrgb" }
+
+anyhow = "1"
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+toml = "0.9"
+clap = { version = "4", features = ["derive", "env"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+fd-lock = "4"
+tempfile = "3"
+windows-service = "0.8"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+# Product names such as OpenRGB appear in prose; backticks would misrepresent them as code.
+doc_markdown = "allow"
