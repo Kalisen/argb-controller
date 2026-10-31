@@ -23,11 +23,8 @@ pub const IDLE_INTERVAL: Duration = Duration::from_millis(500);
 /// Pause after the host wakes before devices are driven again, so that
 /// OpenRGB and the buses underneath it have re-initialized.
 pub const RESUME_SETTLE: Duration = Duration::from_secs(2);
-/// Delays after a resume at which the active lighting is written again.
-/// Some controllers (the Gigabyte board's USB controller among them) come
-/// back to their firmware default seconds after the host is already running,
-/// wiping the first write.
-pub const RESUME_REAPPLY_DELAYS: [Duration; 2] = [Duration::from_secs(10), Duration::from_secs(30)];
+/// Longest wait for OpenRGB to finish detecting hardware again after a resume.
+pub const RESUME_RESCAN_TIMEOUT: Duration = Duration::from_secs(30);
 
 type OpenRgbEngine = Engine<OpenRgbDevice<OpenRgbClient>>;
 
@@ -40,8 +37,6 @@ pub struct Runtime {
     engine: Option<OpenRgbEngine>,
     last_connect_attempt: Option<Instant>,
     desired_state: PowerState,
-    /// Moments at which the state is re-applied after a resume, soonest first.
-    pending_reapplies: Vec<Instant>,
     clock: Instant,
 }
 
@@ -60,31 +55,53 @@ impl Runtime {
             engine: None,
             last_connect_attempt: None,
             desired_state: initial_state,
-            pending_reapplies: Vec::new(),
             clock: Instant::now(),
         }
     }
 
     /// Moves every device to `state`. Entering the active state from sleep
-    /// waits [`RESUME_SETTLE`] first and schedules the writes of
-    /// [`RESUME_REAPPLY_DELAYS`].
+    /// waits [`RESUME_SETTLE`], has OpenRGB detect its hardware again and
+    /// rebuilds the engine before applying.
     pub fn enter_state(&mut self, state: PowerState) {
         info!(%state, "entering state");
         let resuming = state == PowerState::Active && self.desired_state == PowerState::Sleep;
+        self.desired_state = state;
         if resuming {
             std::thread::sleep(RESUME_SETTLE);
-        }
-        self.desired_state = state;
-        self.apply();
-        self.pending_reapplies = if resuming {
-            let now = Instant::now();
-            RESUME_REAPPLY_DELAYS
-                .iter()
-                .map(|delay| now + *delay)
-                .collect()
+            self.rescan_after_resume();
         } else {
-            Vec::new()
+            self.apply();
+        }
+    }
+
+    /// Makes OpenRGB detect its hardware again, then reconnects so the
+    /// engine is rebuilt on the fresh controllers and the state applied.
+    ///
+    /// OpenRGB keeps the device handles it opened before the host slept.
+    /// The Gigabyte board's USB controller no longer answers on them after a
+    /// resume: writes report success and change nothing, and the board shows
+    /// its firmware rainbow until a re-detection.
+    fn rescan_after_resume(&mut self) {
+        self.engine = None;
+        self.last_connect_attempt = None;
+        let settings = &self.config.openrgb;
+        let mut client = match OpenRgbClient::connect(&settings.host, settings.port, CLIENT_NAME) {
+            Ok(client) => client,
+            Err(error) => {
+                warn!(%error, retry_in = ?RECONNECT_INTERVAL, "OpenRGB unavailable after resume");
+                return;
+            }
         };
+        match client.rescan(RESUME_RESCAN_TIMEOUT) {
+            Ok(true) => info!("OpenRGB detected its hardware again"),
+            Ok(false) => warn!(
+                timeout = ?RESUME_RESCAN_TIMEOUT,
+                "no device-list notification; using what OpenRGB lists now"
+            ),
+            Err(error) => warn!(%error, "rescan request failed; using what OpenRGB lists now"),
+        }
+        drop(client);
+        self.connect();
     }
 
     /// Writes the boot lighting to device memory: the state `[boot] follow`
@@ -113,21 +130,6 @@ impl Runtime {
         }
         if self.engine.is_none() && self.reconnect_due() {
             self.connect();
-        }
-        self.reapply_if_due();
-    }
-
-    /// Runs the re-applies scheduled by a resume whose time has come.
-    fn reapply_if_due(&mut self) {
-        let now = Instant::now();
-        while self
-            .pending_reapplies
-            .first()
-            .is_some_and(|due| *due <= now)
-        {
-            self.pending_reapplies.remove(0);
-            info!(state = %self.desired_state, "re-applying lighting after resume");
-            self.apply();
         }
     }
 
