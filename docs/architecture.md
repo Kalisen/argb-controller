@@ -50,7 +50,7 @@ flowchart LR
 | `argb-engine` | The `LightingDevice` trait, the `Engine` that applies a state to devices, and the `PulseWaveform` sampled from one clock. | domain |
 | `argb-backend-openrgb` | OpenRGB SDK protocol, blocking TCP client, and `LightingDevice` for each OpenRGB controller. | domain, engine |
 | `argb-service` | Windows Service entry point, power event handling, config reload, run loop. | all of the above |
-| `argb-cli` | `argb config ...` commands. Only talks to `argb-config`. | domain, config |
+| `argb-cli` | `argb config ...`, `argb devices ...`, `argb apply`, `argb probe-persistence` and `argb service ...` commands. | domain, config, engine, backend-openrgb, service |
 
 ## Key decisions
 
@@ -152,7 +152,7 @@ can write there; everything else in the configuration directory stays
 read-only to it.
 
 `argb service install` copies `argb.exe` and `argb-service.exe` to
-`%ProgramFiles%rgb-controller`, writes a starter configuration when none
+`%ProgramFiles%\argb-controller`, writes a starter configuration when none
 exists and restricts its directory, then registers the service (automatic
 start, `LocalService`, restart on crash three times with a five-second delay)
 and starts it. Running it again stops the service, replaces the binaries and
@@ -314,9 +314,9 @@ docs/
 2. **Static color end to end** (done): controller descriptions and mode/LED updates over the SDK protocol, the `LightingDevice` adapter for OpenRGB, controller-to-alias matching, a service runtime that connects with retry, applies the active profile and follows the configuration file; `argb devices list`.
 3. **Device discovery** (done, [issue 2](https://github.com/Kalisen/argb-controller/issues/2)): `argb devices scan` compares the controllers the backends report with the configured devices, appends a default entry for each new one (alias derived from the reported name, no overrides), and the running service applies the result through the configuration reload.
 4. **Sleep and boot** (done): synchronous suspend handling, pre-shutdown boot lighting, unattended applies, `argb apply`, `argb probe-persistence`.
-5. **Synchronized pulse**: direct-mode streaming at 30 Hz with one clock.
-6. **Installer** (this branch): `argb service install|uninstall|start|stop|status|check`, directory ACL, OpenRGB reachability check.
-7. **Phase 2**: Govee BLE backend.
+5. **Synchronized pulse** (done): direct-mode streaming at 30 Hz with one clock.
+6. **Installer** (done): `argb service install|uninstall|start|stop|status|check`, directory ACL, OpenRGB reachability check.
+7. **Phase 2** (next): Govee BLE backend.
 8. **Phase 2.1**: Logitech G203 through OpenRGB (fix the static color), Cloud Nine C959 keyboard feasibility and backend if a protocol is available.
 9. **Phase 2.5**: security review and fixes.
 10. **Phase 3**: Samsung monitor investigation.

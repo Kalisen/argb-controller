@@ -6,10 +6,14 @@ while the machine is awake and what it shows while the machine sleeps.
 
 ## Status
 
-Early development. The service connects to a local OpenRGB SDK server, maps its
-controllers to configured aliases and applies the configured lighting; `argb devices list`
-shows that mapping and `argb devices scan` adds configuration entries for new hardware. Sleep handling, synchronized pulsing and the installer are still to
-come. See `docs/requirements.md` for the scope and `docs/architecture.md` for the design.
+Phase 1 is complete and runs as an installed service on the author's machine. The
+service connects to a local OpenRGB SDK server, maps its controllers to configured aliases
+and applies the configured lighting: a static color or a software pulse synchronized across
+devices while Windows runs, device-native effects saved to device memory for sleep and
+boot. It survives suspend/resume cycles and OpenRGB's hardware detection at boot.
+`argb devices scan` adds configuration entries for new hardware and `argb service install`
+installs or upgrades the service. Phase 2 (Govee lights over Bluetooth LE) is next. See
+`docs/requirements.md` for the scope and `docs/architecture.md` for the design.
 
 Running it needs [OpenRGB](https://openrgb.org) 1.1 or later (the PawnIO build) with its SDK
 server enabled on the loopback interface.
@@ -19,14 +23,12 @@ server enabled on the loopback interface.
 From an elevated prompt, after `cargo build --release`:
 
 ```
-target
-eleasergb.exe service install
-target
-eleasergb.exe service check
+target\release\argb.exe service install
+target\release\argb.exe service check
 ```
 
-This copies the binaries to `%ProgramFiles%rgb-controller`, writes a starter
-configuration to `%ProgramData%rgb-controller\config.toml` (administrators only), and
+This copies the binaries to `%ProgramFiles%\argb-controller`, writes a starter
+configuration to `%ProgramData%\argb-controller\config.toml` (administrators only), and
 registers and starts the `argb-controller` service. Then describe the hardware:
 
 ```
