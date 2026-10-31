@@ -2,10 +2,10 @@
 
 ## Overview
 
-The system is a Rust workspace of six crates arranged by domain. Business rules
-sit in the inner crates and know nothing about files, sockets or Windows. The
-outer crates adapt those rules to the configuration file, the OpenRGB SDK, the
-Service Control Manager and the command line.
+The system is a Rust workspace of seven crates arranged by domain. Business
+rules sit in the inner crates and know nothing about files, sockets, radios or
+Windows. The outer crates adapt those rules to the configuration file, the
+OpenRGB SDK, Bluetooth LE, the Service Control Manager and the command line.
 
 ```mermaid
 flowchart LR
@@ -20,7 +20,7 @@ flowchart LR
     ENG["argb-engine<br/>state transitions, pulse clock"]:::domain
     DOM["argb-domain<br/>colors, modes, states, profile"]:::domain
     ORGB["argb-backend-openrgb<br/>SDK client, device adapter"]:::adapter
-    GOV["argb-backend-govee<br/>(Phase 2) BLE adapter"]:::adapter
+    GOV["argb-backend-govee<br/>BLE runtime, frames, device adapter"]:::adapter
     FILE[("config.toml")]:::external
     SERVER["OpenRGB SDK server<br/>127.0.0.1:6742"]:::external
     HW["Motherboard + headers<br/>DDR5 RAM, GPU"]:::external
@@ -49,8 +49,9 @@ flowchart LR
 | `argb-config` | Serde mirror of the TOML file, validation, conversion to `LightingProfile`, and `ConfigStore` for locked atomic read-modify-write. | domain |
 | `argb-engine` | The `LightingDevice` trait, the `Engine` that applies a state to devices, and the `PulseWaveform` sampled from one clock. | domain |
 | `argb-backend-openrgb` | OpenRGB SDK protocol, blocking TCP client, and `LightingDevice` for each OpenRGB controller. | domain, engine |
+| `argb-backend-govee` | Govee Bluetooth LE frames and channel cipher, the supported models, a shared Bluetooth runtime with one link per light, `LightingDevice` for each configured light, and the scan behind `argb devices scan`. | domain, engine |
 | `argb-service` | Windows Service entry point, power event handling, config reload, run loop. | all of the above |
-| `argb-cli` | `argb config ...`, `argb devices ...`, `argb apply`, `argb probe-persistence` and `argb service ...` commands. | domain, config, engine, backend-openrgb, service |
+| `argb-cli` | `argb config ...`, `argb devices ...`, `argb apply`, `argb probe-persistence` and `argb service ...` commands. | domain, config, engine, both backends, service |
 
 ## Key decisions
 
@@ -237,11 +238,46 @@ until then.
 
 The service connects to OpenRGB at start and retries every 5 seconds until
 the SDK server answers, so start order between the two services does not
-matter. Any backend error while applying a state or streaming a pulse frame
-drops the connection, and the next poll reconnects and reapplies the desired
-state. The configuration file's modification time is checked once a second;
-a change reloads the profile and reapplies, and a change to the `[openrgb]`
-section reconnects.
+matter. The engine holds the OpenRGB controllers and the configured Govee
+lights behind one `Box<dyn LightingDevice>` list, and the service sorts
+backend errors by the backend the failing alias belongs to. An OpenRGB error
+while applying a state or streaming a pulse frame means the server
+connection is gone: the service drops it, and the next poll reconnects and
+reapplies the desired state. A Govee error means one light is off, out of
+range or busy: the engine remembers which devices failed, and the service
+retries those alone 10 seconds later, while the rest keep their state. The
+configuration file's modification time is checked once a second; a change
+reloads the profile and reapplies, and a change to the `[openrgb]` section
+reconnects.
+
+### Govee lights over Bluetooth LE
+
+Each configured `govee_ble` device is one `GoveeDevice` over a `BleLink`.
+The links share one `BleRuntime`: a single-threaded Tokio runtime owning the
+first Bluetooth adapter, created on the first use and kept for the life of
+the engine. The engine's calls stay synchronous; each one blocks on the
+runtime for the duration of the Bluetooth exchange.
+
+A link finds its light by advertised name, from the adapter's cache first
+and then from a 5 second scan, so a light that is off when the service
+starts is picked up by the retry once it is powered. The advertisement's
+manufacturer data says whether the light uses the encrypted channel; if so
+the link runs the handshake after connecting and ciphers every later frame
+with the session key. Replies arrive as notifications and are drained after
+each write; the handshake has a 6 second timeout.
+
+A static apply is one short connection: power on, color, brightness when it
+changed since the last write (the light flashes on a brightness write),
+then disconnect. The light keeps the state on its own, including across a
+power cycle, so `Persist` needs no action and the sleep lighting written
+before suspend is what the light shows while the PC is off. Direct mode
+(the software pulse) keeps the link open and writes a color frame at most
+every 100 ms; the engine still ticks at 30 Hz, so the light samples the
+same waveform at its own rate. Neither light has a breathing effect of its
+own, so the hardware pulse falls back to the pulse color shown statically,
+the engine's existing rule. The frames, the AES/RC4 channel cipher, the
+pre-shared key and the per-model segment masks are documented with their
+sources in `docs/phase2-govee-ble.md`.
 
 ### Configuration reload
 
@@ -266,6 +302,14 @@ which is stable for fixed hardware. `--rescan` first asks OpenRGB to detect
 hardware again and waits for its device-list notification, for hardware
 plugged in since OpenRGB started; `--dry-run` prints without writing.
 
+The same command then listens for Govee lights over Bluetooth LE for 8
+seconds and appends an entry (`backend = "govee_ble"`, `match_name` set to
+the advertised name) for each supported model no configured device matches;
+other Govee lights are listed as unsupported. `argb devices list` shows the
+lights heard with their model, support and channel. `--no-bluetooth` skips
+the scan, and a machine without a Bluetooth adapter gets a note rather than
+a failure.
+
 ## Security considerations
 
 These are the inputs to the Phase 2.5 review.
@@ -286,8 +330,10 @@ These are the inputs to the Phase 2.5 review.
   input, and `argb config ...` writes need an elevated prompt.
 - The binaries are copied to the program files folder, which is already
   protected, so the registered service path cannot be swapped by a user.
-- Bluetooth pairing material for Phase 2 is stored outside the repository and
-  outside the configuration file.
+- The Govee lights pair with nothing: the encrypted channel's key is the
+  vendor's fixed pre-shared key, already public in the open-source clients
+  this backend follows, and the session key lives only in memory. The
+  configuration holds advertised names only, never addresses.
 - No `unsafe` code in project crates; the lint forbids it at the workspace level.
 
 ## Repository layout
@@ -300,12 +346,14 @@ crates/
   argb-config/
   argb-engine/
   argb-backend-openrgb/
+  argb-backend-govee/
   argb-service/
   argb-cli/
 docs/
   requirements.md
   architecture.md
   contributing.md
+  phase2-govee-ble.md   Govee protocol facts, spike results, backend design
 ```
 
 ## Milestones
@@ -316,7 +364,7 @@ docs/
 4. **Sleep and boot** (done): synchronous suspend handling, pre-shutdown boot lighting, unattended applies, `argb apply`, `argb probe-persistence`.
 5. **Synchronized pulse** (done): direct-mode streaming at 30 Hz with one clock.
 6. **Installer** (done): `argb service install|uninstall|start|stop|status|check`, directory ACL, OpenRGB reachability check.
-7. **Phase 2** (next): Govee BLE backend.
-8. **Phase 2.1**: Logitech G203 through OpenRGB (fix the static color), Cloud Nine C959 keyboard feasibility and backend if a protocol is available.
+7. **Phase 2** (done): Govee BLE backend. A spike settled the protocol, the encrypted channel and Bluetooth from session 0 (`docs/phase2-govee-ble.md`); the `argb-backend-govee` crate drives the Glide Hexa and the Lyra lamp from the service and the CLI, `argb devices scan` adds them, and failed lights are retried without dropping OpenRGB.
+8. **Phase 2.1** (next): Logitech G203 through OpenRGB (fix the static color), Cloud Nine C959 keyboard feasibility and backend if a protocol is available.
 9. **Phase 2.5**: security review and fixes.
 10. **Phase 3**: Samsung monitor investigation.

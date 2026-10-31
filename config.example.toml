@@ -47,3 +47,14 @@ match_name = "TUF"
 mode = "static"
 color = "#000000"
 brightness = 0
+
+# Govee lights are driven over Bluetooth LE. `match_name` is matched against
+# the advertised name (`Govee_<model>_<id>`); the model code in it selects the
+# frame layout. `argb devices scan` adds these entries for you.
+[devices.hexa]
+backend = "govee_ble"
+match_name = "Govee_H6061"
+
+[devices.floor-lamp]
+backend = "govee_ble"
+match_name = "Govee_H6076"

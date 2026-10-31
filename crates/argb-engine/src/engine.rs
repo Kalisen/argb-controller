@@ -43,6 +43,8 @@ pub struct Engine<D: LightingDevice> {
     devices: Vec<D>,
     state: Option<PowerState>,
     pulsing: Vec<SoftwarePulse>,
+    /// Indices of the devices whose last apply failed, for [`Self::retry_failed`].
+    failed: Vec<usize>,
 }
 
 impl<D: LightingDevice> Engine<D> {
@@ -54,6 +56,7 @@ impl<D: LightingDevice> Engine<D> {
             devices,
             state: None,
             pulsing: Vec::new(),
+            failed: Vec::new(),
         }
     }
 
@@ -75,6 +78,12 @@ impl<D: LightingDevice> Engine<D> {
         &self.devices
     }
 
+    /// Whether any device failed its last apply and awaits [`Self::retry_failed`].
+    #[must_use]
+    pub fn has_failed_devices(&self) -> bool {
+        !self.failed.is_empty()
+    }
+
     /// Replaces the profile. Call [`Self::apply_state`] afterwards to show it.
     pub fn set_profile(&mut self, profile: LightingProfile) {
         self.profile = profile;
@@ -89,7 +98,8 @@ impl<D: LightingDevice> Engine<D> {
     /// no breathing effect shows the pulse color statically when unattended.
     ///
     /// Errors are collected rather than aborting, so one failing device does
-    /// not leave the others in the previous state.
+    /// not leave the others in the previous state; the failed devices are
+    /// remembered for [`Self::retry_failed`].
     pub fn apply_state(
         &mut self,
         state: PowerState,
@@ -98,9 +108,34 @@ impl<D: LightingDevice> Engine<D> {
     ) -> Vec<DeviceError> {
         self.state = Some(state);
         self.pulsing.clear();
-        let mut errors = Vec::new();
+        self.failed.clear();
+        let indices: Vec<usize> = (0..self.devices.len()).collect();
+        self.apply_devices(&indices, state, persist, attendance)
+    }
 
-        for (index, device) in self.devices.iter_mut().enumerate() {
+    /// Applies the current state again to the devices whose last apply
+    /// failed (a light out of range, a bus not back yet), leaving the others
+    /// untouched. Does nothing before the first [`Self::apply_state`].
+    pub fn retry_failed(&mut self, persist: Persist, attendance: Attendance) -> Vec<DeviceError> {
+        let Some(state) = self.state else {
+            return Vec::new();
+        };
+        let indices = std::mem::take(&mut self.failed);
+        self.pulsing
+            .retain(|pulse| !indices.contains(&pulse.device_index));
+        self.apply_devices(&indices, state, persist, attendance)
+    }
+
+    fn apply_devices(
+        &mut self,
+        indices: &[usize],
+        state: PowerState,
+        persist: Persist,
+        attendance: Attendance,
+    ) -> Vec<DeviceError> {
+        let mut errors = Vec::new();
+        for &index in indices {
+            let device = &mut self.devices[index];
             let mode = *self.profile.mode_for(device.alias(), state);
             debug!(device = %device.alias(), %state, ?mode, "applying");
             let result = match mode {
@@ -127,6 +162,7 @@ impl<D: LightingDevice> Engine<D> {
             };
             if let Err(error) = result {
                 warn!(device = %device.alias(), %error, "device update failed");
+                self.failed.push(index);
                 errors.push(error);
             }
         }
@@ -172,6 +208,8 @@ mod tests {
         alias: DeviceAlias,
         caps: DeviceCapabilities,
         calls: Vec<Call>,
+        /// Fail the next static apply once, like a light out of range.
+        fail_next: bool,
     }
 
     impl FakeDevice {
@@ -180,6 +218,7 @@ mod tests {
                 alias: DeviceAlias::new(alias).unwrap(),
                 caps,
                 calls: Vec::new(),
+                fail_next: false,
             }
         }
     }
@@ -192,6 +231,12 @@ mod tests {
             self.caps
         }
         fn apply_static(&mut self, c: Rgb, b: Brightness, p: Persist) -> Result<(), DeviceError> {
+            if std::mem::take(&mut self.fail_next) {
+                return Err(DeviceError::Backend {
+                    alias: self.alias.clone(),
+                    message: "out of range".into(),
+                });
+            }
             self.calls.push(Call::Static(c, b, p));
             Ok(())
         }
@@ -383,5 +428,56 @@ mod tests {
         engine.apply_state(PowerState::Sleep, Persist::Volatile, Attendance::Unattended);
         assert!(!engine.has_software_pulse());
         assert_eq!(engine.state(), Some(PowerState::Sleep));
+    }
+
+    #[test]
+    fn retry_failed_applies_only_to_the_devices_that_failed() {
+        let mut lamp = FakeDevice::new("lamp", STATIC_ONLY);
+        lamp.fail_next = true;
+        let devices = vec![FakeDevice::new("ram", DIRECT_ONLY), lamp];
+        let mut engine = Engine::new(profile(), devices);
+        let errors =
+            engine.apply_state(PowerState::Sleep, Persist::Volatile, Attendance::Unattended);
+        assert_eq!(errors.len(), 1);
+        assert!(engine.has_failed_devices());
+
+        let errors = engine.retry_failed(Persist::Volatile, Attendance::Unattended);
+        assert!(errors.is_empty());
+        assert!(!engine.has_failed_devices());
+        assert_eq!(
+            engine.devices()[0].calls.len(),
+            1,
+            "the healthy device was not touched again"
+        );
+        assert_eq!(
+            engine.devices()[1].calls,
+            vec![Call::Static(RED, Brightness::MAX, Persist::Volatile)]
+        );
+    }
+
+    #[test]
+    fn retry_before_any_apply_does_nothing() {
+        let mut engine = Engine::new(profile(), vec![FakeDevice::new("ram", DIRECT_ONLY)]);
+        assert!(
+            engine
+                .retry_failed(Persist::Volatile, Attendance::Attended)
+                .is_empty()
+        );
+        assert!(engine.devices()[0].calls.is_empty());
+    }
+
+    #[test]
+    fn boxed_devices_from_several_backends_share_one_engine() {
+        let devices: Vec<Box<dyn LightingDevice>> = vec![
+            Box::new(FakeDevice::new("board", FULL)),
+            Box::new(FakeDevice::new("lamp", STATIC_ONLY)),
+        ];
+        let mut engine = Engine::new(profile(), devices);
+        assert!(
+            engine
+                .apply_state(PowerState::Active, Persist::Volatile, Attendance::Attended)
+                .is_empty()
+        );
+        assert!(engine.has_software_pulse());
     }
 }

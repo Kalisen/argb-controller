@@ -1,8 +1,8 @@
 # argb-controller
 
-A Windows service that centrally drives the RGB lighting of a PC and, later, of the
-Govee lights in the same room. One configuration file decides what every device shows
-while the machine is awake and what it shows while the machine sleeps.
+A Windows service that centrally drives the RGB lighting of a PC and of the Govee
+lights in the same room. One configuration file decides what every device shows while
+the machine is awake and what it shows while the machine sleeps.
 
 ## Status
 
@@ -12,11 +12,17 @@ and applies the configured lighting: a static color or a software pulse synchron
 devices while Windows runs, device-native effects saved to device memory for sleep and
 boot. It survives suspend/resume cycles and OpenRGB's hardware detection at boot.
 `argb devices scan` adds configuration entries for new hardware and `argb service install`
-installs or upgrades the service. Phase 2 (Govee lights over Bluetooth LE) is next. See
-`docs/requirements.md` for the scope and `docs/architecture.md` for the design.
+installs or upgrades the service.
+
+Phase 2 adds the Govee lights: the service drives the Glide Hexa panels (H6061) and the
+Lyra floor lamp (H6076) directly over Bluetooth LE, including the encrypted channel the
+lamp uses, from the same configuration file and the same power states. `argb devices scan`
+hears the lights and adds them; a light that is off or out of range is retried while the
+PC hardware keeps being driven. See `docs/requirements.md` for the scope,
+`docs/architecture.md` for the design and `docs/phase2-govee-ble.md` for the protocol.
 
 Running it needs [OpenRGB](https://openrgb.org) 1.1 or later (the PawnIO build) with its SDK
-server enabled on the loopback interface.
+server enabled on the loopback interface, and a Bluetooth LE adapter for the Govee lights.
 
 ## Install
 
@@ -42,13 +48,13 @@ removes the registration and leaves the files.
 
 ## Phases
 
-| Phase | Scope |
-|---|---|
-| 1 | In-machine hardware through [OpenRGB](https://openrgb.org): motherboard and its ARGB headers (fans, AIO), DDR5 RAM, GPU |
-| 2 | Govee devices over Bluetooth LE: Glide Hexa panels (H6061), floor lamp (H6076) |
-| 2.1 | USB peripherals: Logitech G203 Lightsync mouse (already visible through OpenRGB), Cloud Nine C959 ErgoTKL keyboard (control path to be established) |
-| 2.5 | Security review of everything implemented so far; every finding is fixed before Phase 3 |
-| 3 | Samsung Odyssey Neo G9 rear lighting, pending a feasible control path |
+| Phase | Scope | Status |
+|---|---|---|
+| 1 | In-machine hardware through [OpenRGB](https://openrgb.org): motherboard and its ARGB headers (fans, AIO), DDR5 RAM, GPU | done |
+| 2 | Govee devices over Bluetooth LE: Glide Hexa panels (H6061), floor lamp (H6076) | done |
+| 2.1 | USB peripherals: Logitech G203 Lightsync mouse (already visible through OpenRGB), Cloud Nine C959 ErgoTKL keyboard (control path to be established) | next |
+| 2.5 | Security review of everything implemented so far; every finding is fixed before Phase 3 | |
+| 3 | Samsung Odyssey Neo G9 rear lighting, pending a feasible control path | |
 
 ## Development conventions
 

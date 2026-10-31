@@ -1,8 +1,10 @@
 # Phase 2: Govee lights over Bluetooth LE
 
 Working notes for the Govee backend: what the community knows about the
-protocol, what the spike verified on the two lights, what is still open, and
-the backend design that follows. The spike lives in `crates/argb-ble-probe`.
+protocol, what the spike verified on the two lights, and the backend design
+that followed. The backend lives in `crates/argb-backend-govee`; the spike
+that preceded it (`crates/argb-ble-probe`) was folded into that crate and
+remains in the history of the branch that added it.
 
 ## Targets
 
@@ -98,38 +100,39 @@ Bluetooth LE from session 0 as `LocalService`: verified the same day. The
 probe installed as a service scanned 15 peripherals, connected to the Hexa,
 completed the exchange and painted it, with nothing published beforehand to
 say the WinRT Bluetooth APIs would work there. The backend can therefore live
-inside the service. To repeat the test from an elevated prompt, with the
-Govee app closed:
+inside the service.
 
-```
-cargo build --release -p argb-ble-probe
-.\target\release\argb-ble-probe.exe service install --name H6061 --layout hexa --color ff8000
-.\target\release\argb-ble-probe.exe service start
-Get-Content "$env:ProgramData\argb-controller\logs\ble-probe.log"
-.\target\release\argb-ble-probe.exe service uninstall
-```
+## Backend (crate `argb-backend-govee`)
 
-The service copies the probe beside the argb-controller binaries, runs the
-same scan and connect once under `LocalService`, and writes its log beside
-the service logs; it ends in `probe finished`.
+- `LightingDevice` for each configured Govee light: `backend = "govee_ble"`
+  in the configuration, with `match_name` matched against the advertised
+  name as for OpenRGB. `argb devices scan` hears the lights and adds the
+  supported models.
+- Modules: `protocol` (frames, layouts, masks), `crypto` (AES-128 ECB plus
+  RC4 under the pre-shared key, then the session key), `model` (H6061 and
+  H6076 recognized from the advertised name), `transport` (one Tokio runtime
+  shared by all links, a `BleLink` per light that scans, connects, runs the
+  handshake when the advertisement asks for it, writes, drains the
+  notifications, and disconnects), `device` (the adapter), `discovery`
+  (devices from the profile, and the scan).
+- A static apply is one short connection: power on, color, brightness when
+  it changed, disconnect. Direct mode keeps the link open and writes at most
+  one color frame per 100 ms while the engine ticks at 30 Hz.
+- Capabilities: hardware brightness (the `33 04` frame), no hardware pulse
+  (neither light has a breathing effect, so the sleep pulse shows its color
+  statically), persistent memory (the lights keep the last state on their
+  own once the link is closed, which the sleep lighting relies on; the
+  deferred cold-boot probe will confirm the power-cycle case).
+- Failure handling lives in the service: a Govee error marks that device as
+  failed in the engine, and the service retries the failed devices 10
+  seconds later; OpenRGB keeps running meanwhile.
+- The layout (segment mask position) comes from the model code in the
+  advertised name.
 
-## Backend design
-
-- New crate `argb-backend-govee` implementing `LightingDevice` for each
-  configured Govee light; `backend = "govee"` in the configuration, with
-  `match_name` matched against the advertised name as for OpenRGB.
-- A session per light: connect on demand, handshake when the advertisement
-  says so, write, keep the link for a short idle period, disconnect. The
-  engine's apply calls stay synchronous; the backend owns a Tokio runtime on
-  its own thread.
-- Capabilities: hardware brightness (the `33 04` frame), no hardware pulse,
-  persistent memory to be confirmed once a light has been observed after a
-  power cycle. Static mode is power on, color, brightness.
-- Software pulse: the engine streams frames at 30 Hz for OpenRGB; a BLE link
-  sustains a few writes per second, so the Govee device will sample the
-  waveform at its own lower rate from the same clock.
-- The model layouts (mask position) are a property of the device entry,
-  derived from the model code in the advertised name.
+Verified on 2026-10-31 with both lights: `argb devices scan` adds them,
+`argb apply active` reaches all seven configured devices with no failure,
+and the service in console mode builds the engine with both lights and
+connects to each on its first apply.
 
 ## Sources
 

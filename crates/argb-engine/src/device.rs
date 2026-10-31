@@ -95,6 +95,44 @@ pub trait LightingDevice {
     fn write_direct(&mut self, color: Rgb) -> Result<(), DeviceError>;
 }
 
+/// A boxed device is a device, so one engine can drive devices from several
+/// backends as `Box<dyn LightingDevice>`.
+impl<T: LightingDevice + ?Sized> LightingDevice for Box<T> {
+    fn alias(&self) -> &DeviceAlias {
+        (**self).alias()
+    }
+
+    fn capabilities(&self) -> DeviceCapabilities {
+        (**self).capabilities()
+    }
+
+    fn apply_static(
+        &mut self,
+        color: Rgb,
+        brightness: Brightness,
+        persist: Persist,
+    ) -> Result<(), DeviceError> {
+        (**self).apply_static(color, brightness, persist)
+    }
+
+    fn apply_hardware_pulse(
+        &mut self,
+        color: Rgb,
+        period: PulsePeriod,
+        persist: Persist,
+    ) -> Result<(), DeviceError> {
+        (**self).apply_hardware_pulse(color, period, persist)
+    }
+
+    fn begin_direct(&mut self) -> Result<(), DeviceError> {
+        (**self).begin_direct()
+    }
+
+    fn write_direct(&mut self, color: Rgb) -> Result<(), DeviceError> {
+        (**self).write_direct(color)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

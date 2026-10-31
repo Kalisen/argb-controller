@@ -79,6 +79,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
+name = "argb-backend-govee"
+version = "0.1.0"
+dependencies = [
+ "aes",
+ "argb-domain",
+ "argb-engine",
+ "btleplug",
+ "futures",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "argb-backend-openrgb"
 version = "0.1.0"
 dependencies = [
@@ -89,28 +104,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "argb-ble-probe"
-version = "0.1.0"
-dependencies = [
- "aes",
- "anyhow",
- "argb-config",
- "btleplug",
- "clap",
- "futures",
- "tokio",
- "tracing",
- "tracing-appender",
- "tracing-subscriber",
- "uuid",
- "windows-service",
-]
-
-[[package]]
 name = "argb-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "argb-backend-govee",
  "argb-backend-openrgb",
  "argb-config",
  "argb-domain",
@@ -154,6 +152,7 @@ name = "argb-service"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "argb-backend-govee",
  "argb-backend-openrgb",
  "argb-config",
  "argb-domain",
