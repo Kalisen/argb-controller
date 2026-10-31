@@ -8,6 +8,9 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::{Context, bail};
+use argb_backend_govee::{
+    SeenLight, SharedRuntime as BleRuntimeSlot, configured_devices, scan_lights,
+};
 use argb_backend_openrgb::protocol::{ColorMode, mode_flags};
 use argb_backend_openrgb::{
     ControllerDescription, ModeMap, OpenRgbClient, assign_aliases, new_devices, open_devices,
@@ -36,6 +39,8 @@ struct Cli {
 
 /// Name this tool registers with the OpenRGB server.
 const CLIENT_NAME: &str = "argb-cli";
+/// How long `devices list` and `devices scan` listen for Govee lights.
+const BLE_SCAN_DURATION: Duration = Duration::from_secs(8);
 
 #[derive(Subcommand)]
 enum TopCommand {
@@ -114,21 +119,30 @@ const PROBE_PALETTE: [(&str, Rgb); 8] = [
 
 #[derive(Subcommand)]
 enum DevicesCommand {
-    /// List the controllers OpenRGB reports and the alias each one maps to.
-    List,
+    /// List the controllers OpenRGB reports and the alias each one maps to,
+    /// then the Govee lights heard over Bluetooth LE.
+    List {
+        /// Skip the Bluetooth LE scan.
+        #[arg(long)]
+        no_bluetooth: bool,
+    },
     /// Print everything OpenRGB reports about one controller: modes with
     /// their flags and ranges, zones and LED count.
     Show {
         /// Controller index as printed by `devices list`.
         index: u32,
     },
-    /// Add a configuration entry for every controller OpenRGB reports that
-    /// no configured device matches. New entries have no overrides, so they
-    /// follow the state defaults; the running service picks the file up.
+    /// Add a configuration entry for every controller OpenRGB reports and
+    /// every supported Govee light heard over Bluetooth LE that no configured
+    /// device matches. New entries have no overrides, so they follow the
+    /// state defaults; the running service picks the file up.
     Scan {
         /// Ask OpenRGB to detect hardware again before scanning.
         #[arg(long)]
         rescan: bool,
+        /// Skip the Bluetooth LE scan.
+        #[arg(long)]
+        no_bluetooth: bool,
         /// Print what would be added without writing the configuration.
         #[arg(long)]
         dry_run: bool,
@@ -344,10 +358,11 @@ fn load_or_starter(store: &ConfigStore) -> anyhow::Result<ConfigFile> {
     }
 }
 
-fn apply_state(store: &ConfigStore, state: PowerState, save: bool) -> anyhow::Result<()> {
-    let config = load_or_starter(store)?;
+/// Every device the configuration drives: the OpenRGB controllers, then the
+/// configured Govee lights (contacted on their first apply).
+fn all_devices(config: &ConfigFile) -> anyhow::Result<Vec<Box<dyn LightingDevice>>> {
     let profile = config.to_profile();
-    let devices = open_devices(
+    let controllers = open_devices(
         &config.openrgb.host,
         config.openrgb.port,
         CLIENT_NAME,
@@ -359,6 +374,20 @@ fn apply_state(store: &ConfigStore, state: PowerState, save: bool) -> anyhow::Re
             config.openrgb.host, config.openrgb.port
         )
     })?;
+    let mut devices: Vec<Box<dyn LightingDevice>> = controllers
+        .into_iter()
+        .map(|device| Box::new(device) as Box<dyn LightingDevice>)
+        .collect();
+    for device in configured_devices(&profile, &BleRuntimeSlot::default()) {
+        devices.push(Box::new(device));
+    }
+    Ok(devices)
+}
+
+fn apply_state(store: &ConfigStore, state: PowerState, save: bool) -> anyhow::Result<()> {
+    let config = load_or_starter(store)?;
+    let profile = config.to_profile();
+    let devices = all_devices(&config)?;
     let persist = if save {
         Persist::SaveToDevice
     } else {
@@ -383,19 +412,7 @@ fn apply_state(store: &ConfigStore, state: PowerState, save: bool) -> anyhow::Re
 
 fn probe_persistence(store: &ConfigStore) -> anyhow::Result<()> {
     let config = load_or_starter(store)?;
-    let profile = config.to_profile();
-    let mut devices = open_devices(
-        &config.openrgb.host,
-        config.openrgb.port,
-        CLIENT_NAME,
-        &profile,
-    )
-    .with_context(|| {
-        format!(
-            "connecting to OpenRGB at {}:{}",
-            config.openrgb.host, config.openrgb.port
-        )
-    })?;
+    let mut devices = all_devices(&config)?;
     println!("{:<34}{:<10}hex", "alias", "color");
     let mut failures = 0;
     for (i, device) in devices.iter_mut().enumerate() {
@@ -428,9 +445,32 @@ fn run_devices(store: &ConfigStore, command: &DevicesCommand) -> anyhow::Result<
         ConfigFile::starter()
     };
     match command {
-        DevicesCommand::List => list_devices(&config),
+        DevicesCommand::List { no_bluetooth } => list_devices(&config, !no_bluetooth),
         DevicesCommand::Show { index } => show_device(&config, *index),
-        DevicesCommand::Scan { rescan, dry_run } => scan_devices(store, &config, *rescan, *dry_run),
+        DevicesCommand::Scan {
+            rescan,
+            no_bluetooth,
+            dry_run,
+        } => scan_devices(store, &config, *rescan, !no_bluetooth, *dry_run),
+    }
+}
+
+/// The Govee lights heard in one scan, or none with the reason printed.
+fn heard_lights(config: &ConfigFile) -> Vec<SeenLight> {
+    println!(
+        "listening for Govee lights over Bluetooth LE for {} s...",
+        BLE_SCAN_DURATION.as_secs()
+    );
+    match scan_lights(
+        &config.to_profile(),
+        &BleRuntimeSlot::default(),
+        BLE_SCAN_DURATION,
+    ) {
+        Ok(lights) => lights,
+        Err(error) => {
+            println!("Bluetooth LE scan skipped: {error}");
+            Vec::new()
+        }
     }
 }
 
@@ -441,6 +481,7 @@ fn scan_devices(
     store: &ConfigStore,
     config: &ConfigFile,
     rescan: bool,
+    bluetooth: bool,
     dry_run: bool,
 ) -> anyhow::Result<()> {
     let mut client = connect(config)?;
@@ -454,8 +495,27 @@ fn scan_devices(
     }
     let controllers = client.controllers()?;
     let found = new_devices(&config.to_profile(), &controllers);
-    if found.is_empty() {
-        println!("every controller OpenRGB reports is already configured");
+    drop(client);
+    let lights = if bluetooth {
+        heard_lights(config)
+    } else {
+        Vec::new()
+    };
+    let new_lights: Vec<&SeenLight> = lights
+        .iter()
+        .filter(|light| !light.configured && light.supported)
+        .collect();
+    for light in lights.iter().filter(|l| !l.configured && !l.supported) {
+        println!(
+            "  skipping {} (model {} is not supported)",
+            light.name,
+            light.model_code.as_deref().unwrap_or("unknown")
+        );
+    }
+    if found.is_empty() && new_lights.is_empty() {
+        println!(
+            "every controller OpenRGB reports and every supported Govee light is already configured"
+        );
         return Ok(());
     }
     for device in &found {
@@ -464,8 +524,12 @@ fn scan_devices(
             device.index, device.alias, device.match_name
         );
     }
+    for light in &new_lights {
+        println!("{:>5}  {:<34}{}", "ble", light.alias, light.name);
+    }
+    let total = found.len() + new_lights.len();
     if dry_run {
-        println!("{} new device(s); nothing written (--dry-run)", found.len());
+        println!("{total} new device(s); nothing written (--dry-run)");
         return Ok(());
     }
     if !store.exists() {
@@ -482,11 +546,20 @@ fn scan_devices(
                 },
             );
         }
+        for light in &new_lights {
+            config
+                .devices
+                .entry(light.alias.clone())
+                .or_insert(DeviceSchema {
+                    backend: Backend::GoveeBle,
+                    match_name: light.name.clone(),
+                    states: BTreeMap::new(),
+                });
+        }
         Ok(())
     })?;
     println!(
-        "added {} device(s) to {}; a running service applies them within a second",
-        found.len(),
+        "added {total} device(s) to {}; a running service applies them within a second",
         store.path().display()
     );
     Ok(())
@@ -567,8 +640,9 @@ fn print_controller(index: u32, controller: &ControllerDescription) {
 }
 
 /// Prints one line per controller: index, alias (marked `*` when it comes
-/// from the configuration), device type, capabilities and reported name.
-fn list_devices(config: &ConfigFile) -> anyhow::Result<()> {
+/// from the configuration), device type, capabilities and reported name;
+/// then one line per Govee light heard, when `bluetooth` is set.
+fn list_devices(config: &ConfigFile, bluetooth: bool) -> anyhow::Result<()> {
     let mut client = connect(config)?;
     let controllers = client.controllers()?;
     let profile = config.to_profile();
@@ -600,6 +674,43 @@ fn list_devices(config: &ConfigFile) -> anyhow::Result<()> {
     println!();
     println!("caps: D direct, B hardware brightness, P hardware pulse, S persistent memory");
     println!("*: alias taken from the configuration; others are derived from the name");
+    drop(client);
+    if !bluetooth {
+        return Ok(());
+    }
+    println!();
+    let lights = heard_lights(config);
+    if lights.is_empty() {
+        println!("no Govee light heard");
+        return Ok(());
+    }
+    println!(
+        "{:<34}{:<8}{:<13}{:<11}name",
+        "alias", "model", "support", "channel"
+    );
+    for light in &lights {
+        let alias = format!(
+            "{}{}",
+            light.alias,
+            if light.configured { " *" } else { "" }
+        );
+        println!(
+            "{:<34}{:<8}{:<13}{:<11}{}",
+            alias,
+            light.model_code.as_deref().unwrap_or("-"),
+            if light.supported {
+                "supported"
+            } else {
+                "unsupported"
+            },
+            if light.encrypted {
+                "encrypted"
+            } else {
+                "plain"
+            },
+            light.name
+        );
+    }
     Ok(())
 }
 

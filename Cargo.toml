@@ -7,7 +7,7 @@ members = [
     "crates/argb-backend-openrgb",
     "crates/argb-service",
     "crates/argb-cli",
-    "crates/argb-ble-probe",
+    "crates/argb-backend-govee",
 ]
 
 [workspace.package]
@@ -22,6 +22,7 @@ argb-domain = { path = "crates/argb-domain" }
 argb-config = { path = "crates/argb-config" }
 argb-engine = { path = "crates/argb-engine" }
 argb-backend-openrgb = { path = "crates/argb-backend-openrgb" }
+argb-backend-govee = { path = "crates/argb-backend-govee" }
 argb-service = { path = "crates/argb-service" }
 
 anyhow = "1"

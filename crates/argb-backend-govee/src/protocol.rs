@@ -1,4 +1,4 @@
-//! The Govee Bluetooth LE command frames the probe sends.
+//! The Govee Bluetooth LE command frames.
 //!
 //! Facts come from community reverse engineering (see
 //! `docs/phase2-govee-ble.md`): every frame is 20 bytes, the first byte names
@@ -6,7 +6,6 @@
 //! and the last byte is the XOR of the nineteen before it. Commands go to one
 //! characteristic, replies arrive as notifications on another.
 
-use clap::ValueEnum;
 use uuid::Uuid;
 
 /// GATT service every known Govee BLE light exposes.
@@ -80,7 +79,7 @@ pub enum SegmentCommand {
 }
 
 /// How a model lays out its segment-color frame.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Layout {
     /// Older family: the manual-color sub-mode with no segments.
     Manual,

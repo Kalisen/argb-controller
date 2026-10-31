@@ -1,13 +1,15 @@
-//! The service body: keeps an engine connected to OpenRGB, follows the
-//! configuration file, and applies the requested power state.
+//! The service body: keeps an engine connected to OpenRGB and the Govee
+//! lights, follows the configuration file, and applies the requested power
+//! state.
 
 use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::Context;
+use argb_backend_govee::{SharedRuntime as BleRuntimeSlot, configured_devices};
 use argb_backend_openrgb::client::RESCAN_QUIET_PERIOD;
-use argb_backend_openrgb::{OpenRgbClient, OpenRgbDevice, SharedClient, open_session};
+use argb_backend_openrgb::{OpenRgbClient, SharedClient, open_session};
 use argb_config::{ConfigFile, ConfigStore};
-use argb_domain::{DeviceAlias, LightingProfile, PowerState};
+use argb_domain::{Backend, DeviceAlias, LightingProfile, PowerState};
 use argb_engine::{Attendance, DEFAULT_TICK_RATE_HZ, DeviceError, Engine, LightingDevice, Persist};
 use tracing::{error, info, warn};
 
@@ -35,8 +37,13 @@ pub const RESUME_RESCAN_TIMEOUT: Duration = Duration::from_secs(30);
 /// detecting, so rebuilding on the first announcement would catch the list
 /// half full; the same quiet period closes a rescan.
 pub const DEVICE_LIST_SETTLE: Duration = RESCAN_QUIET_PERIOD;
+/// Delay before a Govee light that failed its last apply (off, out of
+/// range, Bluetooth busy) is tried again. OpenRGB failures reconnect
+/// instead, since they mean the whole server connection is gone.
+pub const GOVEE_RETRY_INTERVAL: Duration = Duration::from_secs(10);
 
-type OpenRgbEngine = Engine<OpenRgbDevice<OpenRgbClient>>;
+/// The engine drives OpenRGB controllers and Govee lights alike.
+type ServiceEngine = Engine<Box<dyn LightingDevice>>;
 
 /// Runtime state of the service between commands.
 pub struct Runtime {
@@ -44,9 +51,14 @@ pub struct Runtime {
     config: ConfigFile,
     config_modified: Option<SystemTime>,
     last_config_poll: Instant,
-    engine: Option<OpenRgbEngine>,
-    /// The engine's connection, read for server notifications between writes.
+    engine: Option<ServiceEngine>,
+    /// The engine's OpenRGB connection, read for server notifications
+    /// between writes.
     client: Option<SharedClient<OpenRgbClient>>,
+    /// The Bluetooth runtime the Govee devices share, created on first use.
+    ble: BleRuntimeSlot,
+    /// When the devices that failed their last apply are retried, if any did.
+    retry_due: Option<Instant>,
     device_list: DeviceListWatch,
     last_connect_attempt: Option<Instant>,
     desired_state: PowerState,
@@ -99,6 +111,8 @@ impl Runtime {
             last_config_poll: Instant::now(),
             engine: None,
             client: None,
+            ble: BleRuntimeSlot::default(),
+            retry_due: None,
             device_list: DeviceListWatch::default(),
             last_connect_attempt: None,
             desired_state: initial_state,
@@ -204,6 +218,25 @@ impl Runtime {
             self.rescan_due = None;
             self.rescan_after_resume();
         }
+        if self.retry_due.is_some_and(|due| due <= Instant::now()) {
+            self.retry_due = None;
+            self.retry_failed();
+        }
+    }
+
+    /// Applies the state again to the devices whose last apply failed.
+    fn retry_failed(&mut self) {
+        let Some(engine) = self.engine.as_mut() else {
+            return;
+        };
+        if !engine.has_failed_devices() {
+            return;
+        }
+        info!("retrying the devices that failed their last update");
+        let persist = Persist::for_state(self.desired_state, self.config.boot.follow);
+        let attendance = Attendance::for_state(self.desired_state);
+        let errors = engine.retry_failed(persist, attendance);
+        self.handle_errors(&errors);
     }
 
     /// Reads the notifications OpenRGB sent on the engine's connection and
@@ -308,9 +341,13 @@ impl Runtime {
         self.engine = None;
         self.client = None;
         self.device_list = DeviceListWatch::default();
+        self.retry_due = None;
     }
 
-    fn build_engine(&self) -> anyhow::Result<(OpenRgbEngine, SharedClient<OpenRgbClient>)> {
+    /// Opens the OpenRGB session and builds the engine on its controllers
+    /// plus the configured Govee lights. The lights are not contacted here:
+    /// each one connects on its first apply.
+    fn build_engine(&self) -> anyhow::Result<(ServiceEngine, SharedClient<OpenRgbClient>)> {
         let settings = &self.config.openrgb;
         let profile = self.config.to_profile();
         let session = open_session(&settings.host, settings.port, CLIENT_NAME, &profile)
@@ -327,7 +364,16 @@ impl Runtime {
                 profile.devices.len()
             );
         }
-        Ok((Engine::new(profile, session.devices), session.client))
+        let mut devices: Vec<Box<dyn LightingDevice>> = session
+            .devices
+            .into_iter()
+            .map(|device| Box::new(device) as Box<dyn LightingDevice>)
+            .collect();
+        for device in configured_devices(&profile, &self.ble) {
+            info!(alias = %device.alias(), "Govee light configured");
+            devices.push(Box::new(device));
+        }
+        Ok((Engine::new(profile, devices), session.client))
     }
 
     fn apply(&mut self) {
@@ -340,31 +386,56 @@ impl Runtime {
         self.handle_errors(&errors);
     }
 
-    /// Drops the connection on backend failures so that the next poll
-    /// reconnects; capability errors are already logged by the engine.
+    /// Sorts backend failures by origin: a Govee light that failed is
+    /// retried after [`GOVEE_RETRY_INTERVAL`], an OpenRGB failure drops the
+    /// connection so that the next poll reconnects. Capability errors are
+    /// already logged by the engine.
     fn handle_errors(&mut self, errors: &[DeviceError]) {
-        if errors
-            .iter()
-            .any(|error| matches!(error, DeviceError::Backend { .. }))
-        {
+        let mut openrgb_failed = false;
+        let mut govee_failed = false;
+        for error in errors {
+            if let DeviceError::Backend { alias, .. } = error {
+                match backend_of(&self.config, alias) {
+                    Backend::GoveeBle => govee_failed = true,
+                    Backend::OpenRgb => openrgb_failed = true,
+                }
+            }
+        }
+        if openrgb_failed {
             error!("OpenRGB connection lost; reconnecting");
             self.disconnect();
+        } else if govee_failed {
+            warn!(retry_in = ?GOVEE_RETRY_INTERVAL, "a Govee light did not take the update");
+            self.retry_due = Some(Instant::now() + GOVEE_RETRY_INTERVAL);
         }
     }
 }
 
-/// Whether the engine would drive anything the user configured. An empty
-/// profile always passes. A controller list that matches none of the
-/// configured devices is what OpenRGB serves while it is still detecting; an
-/// engine built on it would sit idle, so the caller retries instead.
+/// The backend a device alias belongs to. Aliases the configuration does
+/// not name are OpenRGB controllers the service derived an alias for.
+fn backend_of(config: &ConfigFile, alias: &DeviceAlias) -> Backend {
+    config
+        .devices
+        .get(alias)
+        .map_or(Backend::OpenRgb, |device| device.backend)
+}
+
+/// Whether the engine would drive any OpenRGB controller the user
+/// configured. A profile with no OpenRGB devices always passes. A controller
+/// list that matches none of the configured devices is what OpenRGB serves
+/// while it is still detecting; an engine built on it would sit idle, so the
+/// caller retries instead.
 fn any_configured<'a>(
     profile: &LightingProfile,
     aliases: impl IntoIterator<Item = &'a DeviceAlias>,
 ) -> bool {
-    profile.devices.is_empty()
-        || aliases
-            .into_iter()
-            .any(|alias| profile.devices.contains_key(alias))
+    let configured: Vec<&DeviceAlias> = profile
+        .devices
+        .iter()
+        .filter(|(_, settings)| settings.selector.backend == Backend::OpenRgb)
+        .map(|(alias, _)| alias)
+        .collect();
+    configured.is_empty() || aliases.into_iter().any(|alias| configured.contains(&alias))
 }
 
 fn modified_time(store: &ConfigStore) -> Option<SystemTime> {
@@ -455,5 +526,37 @@ mod tests {
         assert!(any_configured(&profile, [&other, &ram]));
         assert!(!any_configured(&profile, [&other]));
         assert!(!any_configured(&profile, []));
+    }
+
+    #[test]
+    fn govee_only_profiles_accept_any_controller_list() {
+        let mut profile = ConfigFile::starter().to_profile();
+        let mut lamp = settings();
+        lamp.selector.backend = Backend::GoveeBle;
+        profile
+            .devices
+            .insert(DeviceAlias::new("lamp").unwrap(), lamp);
+        assert!(any_configured(&profile, []));
+    }
+
+    #[test]
+    fn unknown_aliases_belong_to_openrgb() {
+        let mut config = ConfigFile::starter();
+        config.devices.insert(
+            DeviceAlias::new("lamp").unwrap(),
+            argb_config::DeviceSchema {
+                backend: Backend::GoveeBle,
+                match_name: "H6076".into(),
+                states: BTreeMap::new(),
+            },
+        );
+        assert_eq!(
+            backend_of(&config, &DeviceAlias::new("lamp").unwrap()),
+            Backend::GoveeBle
+        );
+        assert_eq!(
+            backend_of(&config, &DeviceAlias::new("derived").unwrap()),
+            Backend::OpenRgb
+        );
     }
 }
