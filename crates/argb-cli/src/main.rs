@@ -17,6 +17,8 @@ use argb_domain::{Backend, Brightness, DeviceAlias, LightingMode, PowerState, Pu
 use argb_engine::{Attendance, Engine, LightingDevice, Persist};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
+mod service_admin;
+
 #[derive(Parser)]
 #[command(
     name = "argb",
@@ -62,6 +64,40 @@ enum TopCommand {
     /// Write a distinct color per device to device memory, so that a cold
     /// boot reveals which devices keep their lighting.
     ProbePersistence,
+    /// Install, control and check the Windows service (needs an elevated prompt
+    /// for everything but status and check).
+    Service {
+        #[command(subcommand)]
+        command: ServiceCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum ServiceCommand {
+    /// Copy the binaries to the program directory, restrict the configuration
+    /// directory to administrators, register the service to start at boot as
+    /// LocalService with automatic restart, and start it.
+    Install {
+        /// Directory that receives the binaries. Defaults to the program files folder.
+        #[arg(long)]
+        install_dir: Option<PathBuf>,
+        /// Service executable to install. Defaults to argb-service.exe next to this tool.
+        #[arg(long)]
+        service_binary: Option<PathBuf>,
+        /// Register without starting.
+        #[arg(long)]
+        no_start: bool,
+    },
+    /// Stop and unregister the service, leaving binaries and configuration in place.
+    Uninstall,
+    /// Start the service.
+    Start,
+    /// Stop the service.
+    Stop,
+    /// Print the service registration and state.
+    Status,
+    /// Report on the configuration, the OpenRGB SDK server and the service.
+    Check,
 }
 
 /// Colors used by `probe-persistence`, assigned to devices in list order.
@@ -246,12 +282,57 @@ impl ModeArgs {
 
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
+    let explicit_config = cli.config.clone();
     let store = ConfigStore::new(cli.config.unwrap_or_else(paths::default_config_path));
     match cli.command {
+        TopCommand::Service { command } => {
+            run_service(&store, explicit_config.as_deref(), &command)
+        }
         TopCommand::Config { command } => run_config(&store, command),
         TopCommand::Devices { command } => run_devices(&store, &command),
         TopCommand::Apply { state, save } => apply_state(&store, state.into(), save),
         TopCommand::ProbePersistence => probe_persistence(&store),
+    }
+}
+
+fn run_service(
+    store: &ConfigStore,
+    explicit_config: Option<&std::path::Path>,
+    command: &ServiceCommand,
+) -> anyhow::Result<()> {
+    match command {
+        ServiceCommand::Install {
+            install_dir,
+            service_binary,
+            no_start,
+        } => {
+            let binary = match service_binary {
+                Some(path) => path.clone(),
+                None => service_admin::sibling_service_binary()?,
+            };
+            let dir = install_dir
+                .clone()
+                .unwrap_or_else(service_admin::default_install_dir);
+            service_admin::platform::install(&binary, &dir, store, explicit_config, !no_start)?;
+            println!();
+            service_admin::check(store);
+            Ok(())
+        }
+        ServiceCommand::Uninstall => service_admin::platform::uninstall(),
+        ServiceCommand::Start => service_admin::platform::start(),
+        ServiceCommand::Stop => service_admin::platform::stop(),
+        ServiceCommand::Status => {
+            let (_, line) = service_admin::platform::status_line()?;
+            println!("{line}");
+            Ok(())
+        }
+        ServiceCommand::Check => {
+            if service_admin::check(store) {
+                Ok(())
+            } else {
+                bail!("some checks failed")
+            }
+        }
     }
 }
 
