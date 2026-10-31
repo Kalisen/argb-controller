@@ -146,6 +146,27 @@ range, persistent memory when either mode is saveable (explicitly or
 automatically). A mode that saves automatically receives a plain update even
 under the save-to-device policy, since a save packet would be rejected.
 
+Three rules come from the first run against the real machine:
+
+- A static mode only qualifies when it can carry a color (per-LED array or
+  at least one mode-specific slot). The Logitech G203 advertises a `Static`
+  mode with neither; selecting it just turns the light off, so such a
+  device falls back to Direct.
+- The server validates every mode update against the mode's declared
+  ranges and rejects the whole update otherwise, so the adapter never sends
+  more colors than `colors_max` and keeps speed and brightness in range.
+- When a hardware static mode stores per-LED colors in the controller
+  (Corsair DRAM over SMBus), the color write must not follow the mode
+  commit immediately: the chip is still busy and the write fails its
+  checksum, leaving the default white. The adapter waits half a second
+  between the two. OpenRGB's own window never hits this because a person
+  separates the two clicks.
+
+Zone sizes are OpenRGB's responsibility. The board's ARGB header zones
+report zero LEDs until sized in OpenRGB (which stores the sizes), and
+OpenRGB drives nothing on a zero-sized zone, so the fans and AIO stay dark
+until then.
+
 ### Connection lifecycle
 
 The service connects to OpenRGB at start and retries every 5 seconds until
@@ -207,5 +228,6 @@ docs/
 5. **Synchronized pulse**: direct-mode streaming at 30 Hz with one clock.
 6. **Installer**: `argb service install`, directory ACLs, OpenRGB dependency check.
 7. **Phase 2**: Govee BLE backend.
-8. **Phase 2.5**: security review and fixes.
-9. **Phase 3**: Samsung monitor investigation.
+8. **Phase 2.1**: Logitech G203 through OpenRGB (fix the static color), Cloud Nine C959 keyboard feasibility and backend if a protocol is available.
+9. **Phase 2.5**: security review and fixes.
+10. **Phase 3**: Samsung monitor investigation.

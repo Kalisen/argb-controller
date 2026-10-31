@@ -6,6 +6,7 @@
 //! mode updates and LED writes.
 
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use argb_domain::{Brightness, DeviceAlias, DeviceCapabilities, PulsePeriod, Rgb};
 use argb_engine::{DeviceError, LightingDevice, Persist};
@@ -23,6 +24,13 @@ pub const STATIC_MODE_NAMES: [&str; 2] = ["Static", "Custom"];
 /// Names used for a hardware breathing mode, in order of preference.
 /// Corsair DRAM calls it `Color Pulse`.
 pub const PULSE_MODE_NAMES: [&str; 3] = ["Breathing", "Color Pulse", "Pulse"];
+
+/// Pause between committing a hardware mode and writing its per-LED colors.
+/// Controllers that store colors in their own memory (Corsair DRAM over
+/// SMBus, for one) are still busy right after the mode commit and corrupt a
+/// color write that follows at once; OpenRGB's own window never hits this
+/// because a person separates the two actions by seconds.
+pub const MODE_SWITCH_SETTLE: Duration = Duration::from_millis(500);
 
 /// A client connection shared by every device on it.
 pub type SharedClient<C> = Arc<Mutex<C>>;
@@ -51,7 +59,8 @@ impl ModeMap {
             direct: controller
                 .find_mode(DIRECT_MODE_NAME)
                 .map(|(index, _)| index),
-            static_mode: first_named(&STATIC_MODE_NAMES),
+            static_mode: first_named(&STATIC_MODE_NAMES)
+                .filter(|&index| carries_a_color(&controller.modes[index])),
             pulse: first_named(&PULSE_MODE_NAMES),
         }
     }
@@ -74,6 +83,15 @@ impl ModeMap {
             persistent_memory: static_mode.is_some_and(persists) || pulse.is_some_and(persists),
         }
     }
+}
+
+/// Whether a mode has somewhere to put the requested color: either the
+/// controller's per-LED array or at least one mode-specific color slot.
+/// The Logitech G203 advertises a `Static` mode with neither, which only
+/// turns the light off.
+fn carries_a_color(mode: &ModeDescription) -> bool {
+    mode.has_flag(mode_flags::HAS_PER_LED_COLOR)
+        || (mode.has_flag(mode_flags::HAS_MODE_SPECIFIC_COLOR) && mode.colors_max >= 1)
 }
 
 /// Maps a brightness percentage onto a mode's hardware brightness range.
@@ -104,8 +122,9 @@ pub fn colorize(mode: &ModeDescription, color: Rgb) -> (ModeDescription, bool) {
     let mut mode = mode.clone();
     if mode.has_flag(mode_flags::HAS_MODE_SPECIFIC_COLOR) {
         mode.color_mode = ColorMode::ModeSpecific as u32;
-        let count =
-            usize::try_from(mode.colors_min.max(1).min(mode.colors_max.max(1))).unwrap_or(1);
+        // The server rejects a mode whose color count is outside the declared
+        // range, so stay inside it even when that leaves no slot for the color.
+        let count = usize::try_from(mode.colors_min.max(1).min(mode.colors_max)).unwrap_or(0);
         mode.colors = vec![color; count];
         (mode, false)
     } else if mode.has_flag(mode_flags::HAS_PER_LED_COLOR) {
@@ -249,6 +268,7 @@ impl<C: ControllerCommands> LightingDevice for OpenRgbDevice<C> {
         }
         self.send_mode(index, &mode, persist)?;
         if needs_leds {
+            std::thread::sleep(MODE_SWITCH_SETTLE);
             self.fill_leds(shown)?;
         }
         Ok(())
@@ -419,6 +439,27 @@ mod tests {
                 persistent_memory: true
             }
         );
+    }
+
+    #[test]
+    fn a_static_mode_without_color_slots_is_ignored_in_favor_of_direct() {
+        let mut controller = sample_controller();
+        controller.modes[1] = ModeDescription {
+            name: "Static".into(),
+            flags: mode_flags::HAS_MODE_SPECIFIC_COLOR,
+            colors_min: 0,
+            colors_max: 0,
+            color_mode: ColorMode::ModeSpecific as u32,
+            ..ModeDescription::default()
+        };
+        let map = ModeMap::analyze(&controller);
+        assert_eq!(map.static_mode, None);
+
+        let (mut device, client) = device(controller);
+        device
+            .apply_static(TURQUOISE, Brightness::MAX, Persist::Volatile)
+            .unwrap();
+        assert!(matches!(sent(&client)[0], Sent::Update(7, 0, _)));
     }
 
     #[test]
