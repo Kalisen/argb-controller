@@ -107,10 +107,12 @@ The service accepts `SERVICE_CONTROL_POWEREVENT`, `PRESHUTDOWN` and
 until the run loop reports the devices updated (or 1.8 s pass), because
 Windows may cut power as soon as the handler returns. The sleep profile is
 applied unattended: hardware effects only, saved to device memory. On resume
-the service waits two seconds for OpenRGB and the buses to come back, then
-applies the active profile, and applies it again 10 s and 30 s later: the
-Gigabyte board's USB controller was seen falling back to its firmware
-rainbow seconds after the first write. On pre-shutdown (or shutdown, when pre-shutdown
+the service waits two seconds for OpenRGB and the buses to come back, asks
+OpenRGB to detect its hardware again, reconnects and applies the active
+profile. The re-detection is required: OpenRGB keeps the device handles it
+opened before sleep, and the Gigabyte board's USB controller no longer
+answers on them afterwards, so writes report success while the board shows
+its firmware rainbow. On pre-shutdown (or shutdown, when pre-shutdown
 is not delivered) it applies the state named by `[boot] follow`, again
 unattended and saved, so that POST shows it.
 
