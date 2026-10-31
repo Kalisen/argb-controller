@@ -7,6 +7,7 @@ members = [
     "crates/argb-backend-openrgb",
     "crates/argb-service",
     "crates/argb-cli",
+    "crates/argb-ble-probe",
 ]
 
 [workspace.package]
@@ -34,6 +35,11 @@ tracing-appender = "0.2"
 fd-lock = "4"
 tempfile = "3"
 windows-service = "0.8"
+btleplug = "0.13"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
+futures = "0.3"
+uuid = "1"
+aes = "0.8"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
