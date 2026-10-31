@@ -114,7 +114,12 @@ required: OpenRGB keeps the device handles it opened before sleep, and the
 Gigabyte board's USB controller no longer answers on them afterwards, so
 writes report success while the board shows its firmware rainbow. It must
 not come too early either: a re-detection three seconds after waking left
-every device unresponsive. On pre-shutdown (or shutdown, when pre-shutdown
+every device unresponsive. OpenRGB announces a changed device list (packet
+100) when detection clears the list and again as controllers register, and the
+detection-complete packet exists only from protocol 6 (the client speaks 4),
+so the re-detection counts as finished when announcements have stopped for
+3 s and the list is not empty. If the rebuilt engine maps none of the
+configured devices, it is dropped and the service retries every 5 s. On pre-shutdown (or shutdown, when pre-shutdown
 is not delivered) it applies the state named by `[boot] follow`, again
 unattended and saved, so that POST shows it.
 

@@ -6,8 +6,8 @@ use std::time::{Duration, Instant, SystemTime};
 use anyhow::Context;
 use argb_backend_openrgb::{OpenRgbClient, OpenRgbDevice, open_devices};
 use argb_config::{ConfigFile, ConfigStore};
-use argb_domain::PowerState;
-use argb_engine::{Attendance, DEFAULT_TICK_RATE_HZ, DeviceError, Engine, Persist};
+use argb_domain::{DeviceAlias, LightingProfile, PowerState};
+use argb_engine::{Attendance, DEFAULT_TICK_RATE_HZ, DeviceError, Engine, LightingDevice, Persist};
 use tracing::{error, info, warn};
 
 /// Name the service registers with the OpenRGB server.
@@ -229,6 +229,13 @@ impl Runtime {
                     settings.host, settings.port
                 )
             })?;
+        if !any_configured(&profile, devices.iter().map(LightingDevice::alias)) {
+            anyhow::bail!(
+                "OpenRGB lists {} controller(s), none matching the {} configured device(s)",
+                devices.len(),
+                profile.devices.len()
+            );
+        }
         Ok(Engine::new(profile, devices))
     }
 
@@ -255,6 +262,20 @@ impl Runtime {
     }
 }
 
+/// Whether the engine would drive anything the user configured. An empty
+/// profile always passes. A controller list that matches none of the
+/// configured devices is what OpenRGB serves while it is still detecting; an
+/// engine built on it would sit idle, so the caller retries instead.
+fn any_configured<'a>(
+    profile: &LightingProfile,
+    aliases: impl IntoIterator<Item = &'a DeviceAlias>,
+) -> bool {
+    profile.devices.is_empty()
+        || aliases
+            .into_iter()
+            .any(|alias| profile.devices.contains_key(alias))
+}
+
 fn modified_time(store: &ConfigStore) -> Option<SystemTime> {
     std::fs::metadata(store.path())
         .and_then(|meta| meta.modified())
@@ -276,6 +297,10 @@ fn load_or_starter(store: &ConfigStore) -> ConfigFile {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
+    use argb_domain::{Backend, DeviceSelector, DeviceSettings};
+
     use super::*;
 
     fn runtime_in(state: PowerState) -> Runtime {
@@ -299,5 +324,27 @@ mod tests {
         runtime.enter_state(PowerState::Active);
         runtime.enter_state(PowerState::Sleep);
         assert!(!runtime.rescan_pending());
+    }
+
+    fn settings() -> DeviceSettings {
+        DeviceSettings {
+            selector: DeviceSelector {
+                backend: Backend::OpenRgb,
+                match_name: "ram".to_owned(),
+            },
+            overrides: BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn an_engine_needs_at_least_one_configured_controller() {
+        let mut profile = ConfigFile::starter().to_profile();
+        let ram = DeviceAlias::new("ram").unwrap();
+        let other = DeviceAlias::new("other").unwrap();
+        assert!(any_configured(&profile, [&other]));
+        profile.devices.insert(ram.clone(), settings());
+        assert!(any_configured(&profile, [&other, &ram]));
+        assert!(!any_configured(&profile, [&other]));
+        assert!(!any_configured(&profile, []));
     }
 }
