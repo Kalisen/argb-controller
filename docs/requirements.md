@@ -52,12 +52,13 @@ service makes every device follow it, whether the machine is awake or asleep.
 - **R14** A command-line tool reads and edits the file. All edits are serialized through a lock and written atomically, so scripts can drive it without risking a corrupt file.
 - **R15** The service picks up configuration changes without a restart.
 - **R16** The file rejects unknown keys and out-of-range values with a clear message naming the offending entry.
+- **R17** A CLI scan command detects hardware that the backends report but the configuration does not list, appends a default entry for each such device, and the running service applies the updated configuration. See [issue 2](https://github.com/Kalisen/argb-controller/issues/2).
 
 ### Service
 
-- **R17** The program runs as a Windows Service that starts automatically at boot, before any user logs in.
-- **R18** The same binary can run in the foreground for development.
-- **R19** Device failures are logged and do not stop the service or the other devices.
+- **R18** The program runs as a Windows Service that starts automatically at boot, before any user logs in.
+- **R19** The same binary can run in the foreground for development.
+- **R20** Device failures are logged and do not stop the service or the other devices.
 
 ## Non-functional requirements
 

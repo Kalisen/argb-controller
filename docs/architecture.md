@@ -166,9 +166,10 @@ docs/
 
 1. **Scaffold** (this branch): workspace, domain, config store, engine, protocol client, service and CLI skeletons, all unit tested.
 2. **Static color end to end**: controller enumeration and the `LightingDevice` adapter for OpenRGB; the service applies the active profile at start; `argb devices list`.
-3. **Sleep and boot**: power event handling, hardware pulse mapping, save-to-device, `argb probe-persistence`.
-4. **Synchronized pulse**: direct-mode streaming at 30 Hz with one clock.
-5. **Installer**: `argb service install`, directory ACLs, OpenRGB dependency check.
-6. **Phase 2**: Govee BLE backend.
-7. **Phase 2.5**: security review and fixes.
-8. **Phase 3**: Samsung monitor investigation.
+3. **Device discovery** ([issue 2](https://github.com/Kalisen/argb-controller/issues/2)): `argb devices scan` compares the controllers the backends report with the configured devices, appends a default entry for each new one (alias derived from the reported name, no overrides), and the running service applies the result through the configuration reload.
+4. **Sleep and boot**: power event handling, hardware pulse mapping, save-to-device, `argb probe-persistence`.
+5. **Synchronized pulse**: direct-mode streaming at 30 Hz with one clock.
+6. **Installer**: `argb service install`, directory ACLs, OpenRGB dependency check.
+7. **Phase 2**: Govee BLE backend.
+8. **Phase 2.5**: security review and fixes.
+9. **Phase 3**: Samsung monitor investigation.
