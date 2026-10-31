@@ -19,4 +19,4 @@ pub mod protocol;
 pub use client::{ControllerCommands, OpenRgbClient, OpenRgbError};
 pub use description::{ControllerDescription, ModeDescription};
 pub use device::{ModeMap, OpenRgbDevice, SharedClient};
-pub use discovery::{Assignment, assign_aliases};
+pub use discovery::{Assignment, NewDevice, assign_aliases, new_devices};

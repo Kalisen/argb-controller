@@ -2,7 +2,7 @@
 
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use argb_domain::Rgb;
 use thiserror::Error;
@@ -152,6 +152,17 @@ impl OpenRgbClient {
         (0..count).map(|index| self.controller(index)).collect()
     }
 
+    /// Asks the server to detect hardware again and waits up to `timeout`
+    /// for its device-list notification. Returns whether the notification
+    /// arrived; the device list may have changed either way.
+    ///
+    /// # Errors
+    /// [`OpenRgbError`] on I/O or protocol failure.
+    pub fn rescan(&mut self, timeout: Duration) -> Result<bool, OpenRgbError> {
+        self.send(SERVER_DEVICE_INDEX, PacketId::RequestRescanDevices, &[])?;
+        self.wait_for_notification(PacketId::DeviceListUpdated, timeout)
+    }
+
     /// Switches a controller to its direct or custom mode.
     ///
     /// # Errors
@@ -200,6 +211,55 @@ impl OpenRgbClient {
         self.stream.write_all(payload)?;
         self.stream.flush()?;
         Ok(())
+    }
+
+    /// Reads server notifications until `wanted` arrives or `timeout` passes.
+    /// Any request reply arriving here is a protocol error, since nothing
+    /// was asked.
+    fn wait_for_notification(
+        &mut self,
+        wanted: PacketId,
+        timeout: Duration,
+    ) -> Result<bool, OpenRgbError> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                self.stream.set_read_timeout(Some(IO_TIMEOUT))?;
+                return Ok(false);
+            }
+            self.stream.set_read_timeout(Some(remaining))?;
+            let mut header_bytes = [0u8; HEADER_LEN];
+            match self.stream.read_exact(&mut header_bytes) {
+                Ok(()) => {}
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ) =>
+                {
+                    self.stream.set_read_timeout(Some(IO_TIMEOUT))?;
+                    return Ok(false);
+                }
+                Err(error) => return Err(error.into()),
+            }
+            let header = Header::decode(&header_bytes)?;
+            let mut payload = vec![0u8; header.payload_len as usize];
+            self.stream.read_exact(&mut payload)?;
+            trace!(?header, "received");
+            if header.packet_id == wanted {
+                self.stream.set_read_timeout(Some(IO_TIMEOUT))?;
+                return Ok(true);
+            }
+            if !header.packet_id.is_unsolicited() {
+                self.stream.set_read_timeout(Some(IO_TIMEOUT))?;
+                return Err(OpenRgbError::UnexpectedPacket {
+                    expected: wanted,
+                    got: header.packet_id,
+                });
+            }
+            debug!(packet = ?header.packet_id, "ignoring unsolicited packet");
+        }
     }
 
     /// Reads packets until one of kind `expected` arrives, skipping anything
@@ -351,6 +411,11 @@ mod tests {
                             &count.to_le_bytes(),
                         );
                     }
+                    PacketId::RequestRescanDevices => {
+                        thread::sleep(Duration::from_millis(50));
+                        reply(&mut stream, 0, PacketId::DetectionStarted, &[]);
+                        reply(&mut stream, 0, PacketId::DeviceListUpdated, &[]);
+                    }
                     PacketId::RequestControllerData => {
                         let requested = u32::from_le_bytes(payload[0..4].try_into().unwrap());
                         assert_eq!(requested, serialize_version);
@@ -402,6 +467,23 @@ mod tests {
         let (addr, server) = fake_server(MAX_PROTOCOL_VERSION, vec![expected.clone()]);
         let mut client = connect(addr);
         assert_eq!(client.controllers().unwrap(), vec![expected]);
+        drop(client);
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn rescan_waits_for_the_device_list_notification() {
+        let (addr, server) = fake_server(MAX_PROTOCOL_VERSION, Vec::new());
+        let mut client = connect(addr);
+        assert!(client.rescan(Duration::from_secs(5)).unwrap());
+        // Nothing else is pending, so a second wait times out cleanly and the
+        // connection remains usable.
+        assert!(
+            !client
+                .wait_for_notification(PacketId::DeviceListUpdated, Duration::from_millis(50))
+                .unwrap()
+        );
+        assert_eq!(client.controller_count().unwrap(), 0);
         drop(client);
         server.join().unwrap();
     }
