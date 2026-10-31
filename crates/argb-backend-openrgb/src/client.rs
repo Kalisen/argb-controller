@@ -20,6 +20,11 @@ use crate::protocol::{
 /// Time allowed for the TCP connection and for each reply.
 pub const IO_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// How long device-list announcements must stop after a rescan before
+/// detection is considered finished. Detection takes about a second on the
+/// reference machine; USB and bus probes can leave gaps between announcements.
+pub const RESCAN_QUIET_PERIOD: Duration = Duration::from_secs(3);
+
 /// Errors talking to the server.
 #[derive(Debug, Error)]
 pub enum OpenRgbError {
@@ -153,14 +158,53 @@ impl OpenRgbClient {
     }
 
     /// Asks the server to detect hardware again and waits up to `timeout`
-    /// for its device-list notification. Returns whether the notification
-    /// arrived; the device list may have changed either way.
+    /// for the detection to finish. Returns whether it did, with at least one
+    /// controller listed; the device list may have changed either way.
+    ///
+    /// The server announces a changed device list when it clears the list at
+    /// the start of detection and again as controllers register, so the first
+    /// announcement does not mean detection is over. At protocol version 4 the
+    /// server sends no detection-complete packet (version 6 and later do), so
+    /// detection counts as done once announcements stop for
+    /// [`RESCAN_QUIET_PERIOD`] and the list is not empty.
     ///
     /// # Errors
     /// [`OpenRgbError`] on I/O or protocol failure.
     pub fn rescan(&mut self, timeout: Duration) -> Result<bool, OpenRgbError> {
+        self.rescan_with_quiet_period(timeout, RESCAN_QUIET_PERIOD)
+    }
+
+    fn rescan_with_quiet_period(
+        &mut self,
+        timeout: Duration,
+        quiet_period: Duration,
+    ) -> Result<bool, OpenRgbError> {
         self.send(SERVER_DEVICE_INDEX, PacketId::RequestRescanDevices, &[])?;
-        self.wait_for_notification(PacketId::DeviceListUpdated, timeout)
+        let deadline = Instant::now() + timeout;
+        let mut announced = false;
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Ok(false);
+            }
+            let wait = if announced {
+                quiet_period.min(remaining)
+            } else {
+                remaining
+            };
+            match self.read_notification(wait)? {
+                Some(PacketId::DetectionComplete) => return Ok(true),
+                Some(PacketId::DeviceListUpdated) => announced = true,
+                Some(_) => {}
+                None if !announced => return Ok(false),
+                None => {
+                    if self.controller_count()? > 0 {
+                        return Ok(true);
+                    }
+                    debug!("rescan went quiet with an empty device list; still waiting");
+                }
+            }
+        }
     }
 
     /// Switches a controller to its direct or custom mode.
@@ -216,6 +260,7 @@ impl OpenRgbClient {
     /// Reads server notifications until `wanted` arrives or `timeout` passes.
     /// Any request reply arriving here is a protocol error, since nothing
     /// was asked.
+    #[cfg(test)]
     fn wait_for_notification(
         &mut self,
         wanted: PacketId,
@@ -224,41 +269,48 @@ impl OpenRgbClient {
         let deadline = Instant::now() + timeout;
         loop {
             let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
-                self.stream.set_read_timeout(Some(IO_TIMEOUT))?;
-                return Ok(false);
+            match self.read_notification(remaining)? {
+                Some(id) if id == wanted => return Ok(true),
+                Some(_) => {}
+                None => return Ok(false),
             }
-            self.stream.set_read_timeout(Some(remaining))?;
-            let mut header_bytes = [0u8; HEADER_LEN];
-            match self.stream.read_exact(&mut header_bytes) {
-                Ok(()) => {}
-                Err(error)
-                    if matches!(
-                        error.kind(),
-                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
-                    ) =>
-                {
-                    self.stream.set_read_timeout(Some(IO_TIMEOUT))?;
-                    return Ok(false);
-                }
-                Err(error) => return Err(error.into()),
+        }
+    }
+
+    /// Reads one server notification, waiting at most `timeout`. Returns
+    /// `None` when none arrived. Any request reply arriving here is a
+    /// protocol error, since nothing was asked.
+    fn read_notification(&mut self, timeout: Duration) -> Result<Option<PacketId>, OpenRgbError> {
+        if timeout.is_zero() {
+            return Ok(None);
+        }
+        self.stream.set_read_timeout(Some(timeout))?;
+        let mut header_bytes = [0u8; HEADER_LEN];
+        let read = self.stream.read_exact(&mut header_bytes);
+        self.stream.set_read_timeout(Some(IO_TIMEOUT))?;
+        match read {
+            Ok(()) => {}
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) =>
+            {
+                return Ok(None);
             }
-            let header = Header::decode(&header_bytes)?;
-            let mut payload = vec![0u8; header.payload_len as usize];
-            self.stream.read_exact(&mut payload)?;
-            trace!(?header, "received");
-            if header.packet_id == wanted {
-                self.stream.set_read_timeout(Some(IO_TIMEOUT))?;
-                return Ok(true);
-            }
-            if !header.packet_id.is_unsolicited() {
-                self.stream.set_read_timeout(Some(IO_TIMEOUT))?;
-                return Err(OpenRgbError::UnexpectedPacket {
-                    expected: wanted,
-                    got: header.packet_id,
-                });
-            }
-            debug!(packet = ?header.packet_id, "ignoring unsolicited packet");
+            Err(error) => return Err(error.into()),
+        }
+        let header = Header::decode(&header_bytes)?;
+        let mut payload = vec![0u8; header.payload_len as usize];
+        self.stream.read_exact(&mut payload)?;
+        trace!(?header, "received");
+        if header.packet_id.is_unsolicited() {
+            Ok(Some(header.packet_id))
+        } else {
+            Err(OpenRgbError::UnexpectedPacket {
+                expected: PacketId::DeviceListUpdated,
+                got: header.packet_id,
+            })
         }
     }
 
@@ -368,6 +420,20 @@ mod tests {
         server_version: u32,
         controllers: Vec<ControllerDescription>,
     ) -> (SocketAddr, thread::JoinHandle<Observed>) {
+        let script = vec![
+            (50, PacketId::DetectionStarted),
+            (0, PacketId::DeviceListUpdated),
+        ];
+        fake_server_scripted(server_version, controllers, script)
+    }
+
+    /// Like [`fake_server`]; answers a rescan request by sending each packet
+    /// of `rescan_script` after its delay in milliseconds.
+    fn fake_server_scripted(
+        server_version: u32,
+        controllers: Vec<ControllerDescription>,
+        rescan_script: Vec<(u64, PacketId)>,
+    ) -> (SocketAddr, thread::JoinHandle<Observed>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         let handle = thread::spawn(move || {
@@ -412,9 +478,10 @@ mod tests {
                         );
                     }
                     PacketId::RequestRescanDevices => {
-                        thread::sleep(Duration::from_millis(50));
-                        reply(&mut stream, 0, PacketId::DetectionStarted, &[]);
-                        reply(&mut stream, 0, PacketId::DeviceListUpdated, &[]);
+                        for (delay_ms, id) in &rescan_script {
+                            thread::sleep(Duration::from_millis(*delay_ms));
+                            reply(&mut stream, 0, *id, &[]);
+                        }
                     }
                     PacketId::RequestControllerData => {
                         let requested = u32::from_le_bytes(payload[0..4].try_into().unwrap());
@@ -471,19 +538,87 @@ mod tests {
         server.join().unwrap();
     }
 
+    const TEST_QUIET: Duration = Duration::from_millis(200);
+
     #[test]
-    fn rescan_waits_for_the_device_list_notification() {
+    fn rescan_outlasts_the_announcement_sent_when_the_list_is_cleared() {
+        let script = vec![
+            (0, PacketId::DeviceListUpdated),
+            (100, PacketId::DeviceListUpdated),
+            (100, PacketId::DeviceListUpdated),
+        ];
+        let (addr, server) =
+            fake_server_scripted(MAX_PROTOCOL_VERSION, vec![sample_controller()], script);
+        let mut client = connect(addr);
+        let started = Instant::now();
+        assert!(
+            client
+                .rescan_with_quiet_period(Duration::from_secs(5), TEST_QUIET)
+                .unwrap()
+        );
+        // Last announcement at ~200 ms, then a full quiet period.
+        assert!(started.elapsed() >= Duration::from_millis(200) + TEST_QUIET);
+        assert_eq!(client.controller_count().unwrap(), 1);
+        drop(client);
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn rescan_returns_on_the_detection_complete_packet() {
+        let script = vec![
+            (0, PacketId::DeviceListUpdated),
+            (50, PacketId::DetectionComplete),
+        ];
+        let (addr, server) =
+            fake_server_scripted(MAX_PROTOCOL_VERSION, vec![sample_controller()], script);
+        let mut client = connect(addr);
+        let started = Instant::now();
+        assert!(
+            client
+                .rescan_with_quiet_period(Duration::from_secs(5), Duration::from_secs(5))
+                .unwrap()
+        );
+        assert!(started.elapsed() < Duration::from_secs(2));
+        drop(client);
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn rescan_reports_failure_while_the_device_list_stays_empty() {
         let (addr, server) = fake_server(MAX_PROTOCOL_VERSION, Vec::new());
         let mut client = connect(addr);
-        assert!(client.rescan(Duration::from_secs(5)).unwrap());
-        // Nothing else is pending, so a second wait times out cleanly and the
-        // connection remains usable.
+        assert!(
+            !client
+                .rescan_with_quiet_period(Duration::from_millis(600), TEST_QUIET)
+                .unwrap()
+        );
+        drop(client);
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn rescan_reports_failure_when_the_server_announces_nothing() {
+        let (addr, server) = fake_server_scripted(MAX_PROTOCOL_VERSION, Vec::new(), Vec::new());
+        let mut client = connect(addr);
+        assert!(
+            !client
+                .rescan_with_quiet_period(Duration::from_millis(100), TEST_QUIET)
+                .unwrap()
+        );
+        drop(client);
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn wait_for_notification_times_out_cleanly_and_the_connection_stays_usable() {
+        let (addr, server) = fake_server(MAX_PROTOCOL_VERSION, vec![sample_controller()]);
+        let mut client = connect(addr);
         assert!(
             !client
                 .wait_for_notification(PacketId::DeviceListUpdated, Duration::from_millis(50))
                 .unwrap()
         );
-        assert_eq!(client.controller_count().unwrap(), 0);
+        assert_eq!(client.controller_count().unwrap(), 1);
         drop(client);
         server.join().unwrap();
     }
