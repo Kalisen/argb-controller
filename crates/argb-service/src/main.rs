@@ -15,14 +15,7 @@ use tracing::{error, info};
 
 use crate::runtime::Runtime;
 
-/// Service name registered with the Service Control Manager.
-pub const SERVICE_NAME: &str = "argb-controller";
-/// Name shown in the Services console.
-pub const SERVICE_DISPLAY_NAME: &str = "ARGB Controller";
-/// Flag that runs the service logic in the foreground.
-const CONSOLE_FLAG: &str = "--console";
-/// Flag naming the configuration file; defaults to the machine-wide file.
-const CONFIG_FLAG: &str = "--config";
+use argb_service::{CONFIG_FLAG, CONSOLE_FLAG, SERVICE_NAME};
 
 /// Longest time the suspend handler blocks while the sleep lighting is
 /// written. Windows expects power-event handlers to return promptly; two

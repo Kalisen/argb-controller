@@ -21,6 +21,7 @@ argb-domain = { path = "crates/argb-domain" }
 argb-config = { path = "crates/argb-config" }
 argb-engine = { path = "crates/argb-engine" }
 argb-backend-openrgb = { path = "crates/argb-backend-openrgb" }
+argb-service = { path = "crates/argb-service" }
 
 anyhow = "1"
 thiserror = "2"

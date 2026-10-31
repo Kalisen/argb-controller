@@ -86,7 +86,9 @@ dependencies = [
  "argb-config",
  "argb-domain",
  "argb-engine",
+ "argb-service",
  "clap",
+ "windows-service",
 ]
 
 [[package]]

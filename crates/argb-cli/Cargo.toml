@@ -16,8 +16,12 @@ argb-domain = { workspace = true }
 argb-config = { workspace = true }
 argb-backend-openrgb = { workspace = true }
 argb-engine = { workspace = true }
+argb-service = { workspace = true }
 anyhow = { workspace = true }
 clap = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+windows-service = { workspace = true }
 
 [lints]
 workspace = true

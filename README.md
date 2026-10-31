@@ -11,8 +11,29 @@ controllers to configured aliases and applies the configured lighting; `argb dev
 shows that mapping and `argb devices scan` adds configuration entries for new hardware. Sleep handling, synchronized pulsing and the installer are still to
 come. See `docs/requirements.md` for the scope and `docs/architecture.md` for the design.
 
-Running it today needs [OpenRGB](https://openrgb.org) 1.0 (the PawnIO build) with its SDK
+Running it needs [OpenRGB](https://openrgb.org) 1.1 or later (the PawnIO build) with its SDK
 server enabled on the loopback interface.
+
+## Install
+
+From an elevated prompt, after `cargo build --release`:
+
+```
+targeteleasergb.exe service install
+targeteleasergb.exe service check
+```
+
+This copies the binaries to `%ProgramFiles%rgb-controller`, writes a starter
+configuration to `%ProgramData%rgb-controller\config.toml` (administrators only), and
+registers and starts the `argb-controller` service. Then describe the hardware:
+
+```
+argb devices scan
+argb config set-default --state active --mode static --color "#40E0D0"
+```
+
+The service picks up every configuration change within a second. `argb service uninstall`
+removes the registration and leaves the files.
 
 ## Phases
 

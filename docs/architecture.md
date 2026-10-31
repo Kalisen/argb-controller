@@ -118,6 +118,22 @@ breathing effect and show the pulse color statically on a device that has
 none. `argb apply <state>` runs an unattended apply from the command line to
 preview the sleep or boot lighting without suspending the machine.
 
+### Installation
+
+`argb service install` copies `argb.exe` and `argb-service.exe` to
+`%ProgramFiles%rgb-controller`, writes a starter configuration when none
+exists and restricts its directory, then registers the service (automatic
+start, `LocalService`, restart on crash three times with a five-second delay)
+and starts it. Running it again stops the service, replaces the binaries and
+updates the registration, so it doubles as the upgrade path. `uninstall`
+stops and unregisters without deleting files. `status` and `check` work from
+any prompt; `check` also reports whether the OpenRGB SDK port answers and
+whether the configuration parses.
+
+OpenRGB itself is not installed by this project. It must run with its SDK
+server on the loopback interface; the service retries the connection every
+five seconds, so start order does not matter.
+
 ### Persistence probe
 
 `argb probe-persistence` writes a distinct color per device with the
@@ -226,13 +242,19 @@ These are the inputs to the Phase 2.5 review.
 - The OpenRGB SDK has no authentication. The service connects only to the
   loopback address; the configuration schema defaults to it and the
   documentation says why.
-- The service runs as LocalSystem to receive power events and start before
-  login. It must not execute anything from the configuration file: the file
-  holds data only, and `deny_unknown_fields` rejects anything unexpected.
-- The configuration directory under the machine-wide program data folder
-  should be writable by administrators only, so an unprivileged process cannot
-  make the service change lighting or crash on malformed input. The installer
-  sets this ACL.
+- The service runs as `NT AUTHORITY\LocalService`: it needs only the
+  loopback network and read access to the configuration, and power events
+  reach every service regardless of account. It must not execute anything
+  from the configuration file: the file holds data only, and
+  `deny_unknown_fields` rejects anything unexpected.
+- The configuration directory under the machine-wide program data folder is
+  writable by administrators and SYSTEM only, readable by the service
+  account and local users, with inheritance cut. `argb service install`
+  sets this ACL with `icacls` using well-known SIDs, so an unprivileged
+  process cannot make the service change lighting or crash on malformed
+  input, and `argb config ...` writes need an elevated prompt.
+- The binaries are copied to the program files folder, which is already
+  protected, so the registered service path cannot be swapped by a user.
 - Bluetooth pairing material for Phase 2 is stored outside the repository and
   outside the configuration file.
 - No `unsafe` code in project crates; the lint forbids it at the workspace level.
@@ -260,9 +282,9 @@ docs/
 1. **Scaffold** (done): workspace, domain, config store, engine, protocol client, service and CLI skeletons, all unit tested.
 2. **Static color end to end** (done): controller descriptions and mode/LED updates over the SDK protocol, the `LightingDevice` adapter for OpenRGB, controller-to-alias matching, a service runtime that connects with retry, applies the active profile and follows the configuration file; `argb devices list`.
 3. **Device discovery** (done, [issue 2](https://github.com/Kalisen/argb-controller/issues/2)): `argb devices scan` compares the controllers the backends report with the configured devices, appends a default entry for each new one (alias derived from the reported name, no overrides), and the running service applies the result through the configuration reload.
-4. **Sleep and boot** (this branch): synchronous suspend handling, pre-shutdown boot lighting, unattended applies, `argb apply`, `argb probe-persistence`.
+4. **Sleep and boot** (done): synchronous suspend handling, pre-shutdown boot lighting, unattended applies, `argb apply`, `argb probe-persistence`.
 5. **Synchronized pulse**: direct-mode streaming at 30 Hz with one clock.
-6. **Installer**: `argb service install`, directory ACLs, OpenRGB dependency check.
+6. **Installer** (this branch): `argb service install|uninstall|start|stop|status|check`, directory ACL, OpenRGB reachability check.
 7. **Phase 2**: Govee BLE backend.
 8. **Phase 2.1**: Logitech G203 through OpenRGB (fix the static color), Cloud Nine C959 keyboard feasibility and backend if a protocol is available.
 9. **Phase 2.5**: security review and fixes.
