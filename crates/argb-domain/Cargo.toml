@@ -1,0 +1,15 @@
+[package]
+name = "argb-domain"
+description = "Core lighting domain model: colors, modes, power states, profiles and device capabilities"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+thiserror = { workspace = true }
+
+[lints]
+workspace = true

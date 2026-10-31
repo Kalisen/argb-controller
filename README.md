@@ -24,3 +24,7 @@ for the design once they land on `main`.
 - New work happens in a `feature/...`, `fix/...` or `maintain/...` branch checked out as a
   git worktree under `.worktrees/` (ignored by git), so `main` stays available for experiments.
 - Commit messages follow the template in `docs/contributing.md`.
+
+## License
+
+MIT. See [LICENSE](LICENSE).
