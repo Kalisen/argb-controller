@@ -61,7 +61,8 @@ impl ModeMap {
                 .map(|(index, _)| index),
             static_mode: first_named(&STATIC_MODE_NAMES)
                 .filter(|&index| carries_a_color(&controller.modes[index])),
-            pulse: first_named(&PULSE_MODE_NAMES),
+            pulse: first_named(&PULSE_MODE_NAMES)
+                .filter(|&index| carries_a_color(&controller.modes[index])),
         }
     }
 
@@ -87,8 +88,13 @@ impl ModeMap {
 
 /// Whether a mode has somewhere to put the requested color: either the
 /// controller's per-LED array or at least one mode-specific color slot.
-/// The Logitech G203 advertises a `Static` mode with neither, which only
-/// turns the light off.
+/// The Logitech G203 advertises `Static` and `Breathing` modes with
+/// neither: its OpenRGB driver sizes their color list to one entry but
+/// leaves `colors_max` at zero, and the server rejects any update that
+/// carries more colors than `colors_max`. An update inside the range has no
+/// color at all, which the driver renders as off. Such a mode is unusable
+/// over the SDK, so the device falls back to Direct for static and to the
+/// static fallback for the pulse.
 fn carries_a_color(mode: &ModeDescription) -> bool {
     mode.has_flag(mode_flags::HAS_PER_LED_COLOR)
         || (mode.has_flag(mode_flags::HAS_MODE_SPECIFIC_COLOR) && mode.colors_max >= 1)
@@ -469,6 +475,23 @@ mod tests {
             .apply_static(TURQUOISE, Brightness::MAX, Persist::Volatile)
             .unwrap();
         assert!(matches!(sent(&client)[0], Sent::Update(7, 0, _)));
+    }
+
+    #[test]
+    fn a_pulse_mode_without_color_slots_is_not_a_hardware_pulse() {
+        let mut controller = sample_controller();
+        let pulse = controller.find_mode("Breathing").map(|(i, _)| i).unwrap();
+        controller.modes[pulse] = ModeDescription {
+            name: "Breathing".into(),
+            flags: mode_flags::HAS_SPEED | mode_flags::HAS_MODE_SPECIFIC_COLOR,
+            colors_min: 0,
+            colors_max: 0,
+            color_mode: ColorMode::ModeSpecific as u32,
+            ..ModeDescription::default()
+        };
+        let map = ModeMap::analyze(&controller);
+        assert_eq!(map.pulse, None);
+        assert!(!map.capabilities(&controller).hardware_pulse);
     }
 
     #[test]

@@ -215,10 +215,12 @@ under the save-to-device policy, since a save packet would be rejected.
 
 Three rules come from the first run against the real machine:
 
-- A static mode only qualifies when it can carry a color (per-LED array or
-  at least one mode-specific slot). The Logitech G203 advertises a `Static`
-  mode with neither; selecting it just turns the light off, so such a
-  device falls back to Direct.
+- A static or breathing mode only qualifies when it can carry a color
+  (per-LED array or at least one mode-specific slot). The Logitech G203
+  advertises `Static` and `Breathing` modes with neither, an OpenRGB
+  driver defect the server's validation turns into a black light (see
+  `docs/phase2-1-peripherals.md`); such a device falls back to Direct for
+  static and to the static fallback for the pulse.
 - The server validates every mode update against the mode's declared
   ranges and rejects the whole update otherwise, so the adapter never sends
   more colors than `colors_max` and keeps speed and brightness in range.
@@ -354,6 +356,7 @@ docs/
   architecture.md
   contributing.md
   phase2-govee-ble.md   Govee protocol facts, spike results, backend design
+  phase2-1-peripherals.md   G203 findings and workaround, C959 keyboard identity and capture plan
 ```
 
 ## Milestones
@@ -365,6 +368,6 @@ docs/
 5. **Synchronized pulse** (done): direct-mode streaming at 30 Hz with one clock.
 6. **Installer** (done): `argb service install|uninstall|start|stop|status|check`, directory ACL, OpenRGB reachability check.
 7. **Phase 2** (done): Govee BLE backend. A spike settled the protocol, the encrypted channel and Bluetooth from session 0 (`docs/phase2-govee-ble.md`); the `argb-backend-govee` crate drives the Glide Hexa and the Lyra lamp from the service and the CLI, `argb devices scan` adds them, and failed lights are retried without dropping OpenRGB.
-8. **Phase 2.1** (next): Logitech G203 through OpenRGB (fix the static color), Cloud Nine C959 keyboard feasibility and backend if a protocol is available.
+8. **Phase 2.1** (in progress): the G203's static color is an OpenRGB driver defect (`colors_max` left at zero) that the SDK cannot work around; the adapter now also refuses a breathing mode that cannot carry a color, and the fix is reported upstream. The Cloud Nine C959 is a Sonix keyboard (`0C45:8008`) with a vendor-defined HID collection and no published protocol; a USB capture of the vendor app decides whether a backend is possible (`docs/phase2-1-peripherals.md`).
 9. **Phase 2.5**: security review and fixes.
 10. **Phase 3**: Samsung monitor investigation.
