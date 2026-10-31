@@ -52,7 +52,7 @@ removes the registration and leaves the files.
 |---|---|---|
 | 1 | In-machine hardware through [OpenRGB](https://openrgb.org): motherboard and its ARGB headers (fans, AIO), DDR5 RAM, GPU | done |
 | 2 | Govee devices over Bluetooth LE: Glide Hexa panels (H6061), floor lamp (H6076) | done |
-| 2.1 | USB peripherals: Logitech G203 Lightsync mouse (already visible through OpenRGB), Cloud Nine C959 ErgoTKL keyboard (control path to be established) | next |
+| 2.1 | USB peripherals: Logitech G203 Lightsync mouse (already visible through OpenRGB), Cloud Nine C959 ErgoTKL keyboard (control path to be established) | in progress |
 | 2.5 | Security review of everything implemented so far; every finding is fixed before Phase 3 | |
 | 3 | Samsung Odyssey Neo G9 rear lighting, pending a feasible control path | |
 

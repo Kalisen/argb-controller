@@ -28,8 +28,8 @@ service makes every device follow it, whether the machine is awake or asleep.
 
 | Device | Connection | Controlled through |
 |---|---|---|
-| Logitech G203 Lightsync | USB HID | OpenRGB "Logitech G203 Lightsync" (detected; Static mode currently ignores the color, to investigate) |
-| Cloud Nine C959 ErgoTKL (Cherry MX Brown) | USB HID | Unknown; not in the OpenRGB device list as of 1.1, the vendor ships its own Windows application |
+| Logitech G203 Lightsync | USB HID | OpenRGB "Logitech G203 Lightsync" in Direct mode; its Static and Breathing modes cannot carry a color over the SDK in OpenRGB 1.1 (driver defect, reported upstream) |
+| Cloud Nine C959 ErgoTKL (Cherry MX Brown) | USB HID | Sonix keyboard `0C45:8008` with a vendor-defined HID collection; not in OpenRGB, protocol unpublished, to be captured from the vendor application (`docs/phase2-1-peripherals.md`) |
 
 ## Functional requirements
 
