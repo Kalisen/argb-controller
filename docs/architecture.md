@@ -94,18 +94,37 @@ stateDiagram-v2
     classDef off fill:#F6E7C1,stroke:#8A6D1D,color:#3D2F05
 
     [*] --> Active: service start
-    Active --> Sleep: PBT_APMSUSPEND<br/>apply sleep lighting<br/>(hardware modes, saved)
-    Sleep --> Active: PBT_APMRESUMEAUTOMATIC<br/>apply active lighting
-    Active --> [*]: SERVICE_CONTROL_SHUTDOWN<br/>persist boot lighting
+    Active --> Sleep: PBT_APMSUSPEND<br/>apply sleep lighting<br/>(hardware modes, saved)<br/>handler blocks until done
+    Sleep --> Active: PBT_APMRESUMEAUTOMATIC<br/>wait 2 s, apply active lighting
+    Active --> [*]: SERVICE_CONTROL_PRESHUTDOWN<br/>apply [boot] follow state<br/>(hardware modes, saved)
 
     class Active on
     class Sleep off
 ```
 
-The service registers for `SERVICE_CONTROL_POWEREVENT`. On suspend it applies
-the sleep profile using hardware modes so the devices keep running on their
-own. On resume it reapplies the active profile. On shutdown it writes the
-configured boot state to device memory so POST shows it.
+The service accepts `SERVICE_CONTROL_POWEREVENT`, `PRESHUTDOWN` and
+`SHUTDOWN`. On suspend the control handler sends the sleep command and blocks
+until the run loop reports the devices updated (or 1.8 s pass), because
+Windows may cut power as soon as the handler returns. The sleep profile is
+applied unattended: hardware effects only, saved to device memory. On resume
+the service waits two seconds for OpenRGB and the buses to come back, then
+applies the active profile. On pre-shutdown (or shutdown, when pre-shutdown
+is not delivered) it applies the state named by `[boot] follow`, again
+unattended and saved, so that POST shows it.
+
+The engine's `Attendance` captures the distinction: attended applies may use
+the synchronized software pulse; unattended applies use each device's own
+breathing effect and show the pulse color statically on a device that has
+none. `argb apply <state>` runs an unattended apply from the command line to
+preview the sleep or boot lighting without suspending the machine.
+
+### Persistence probe
+
+`argb probe-persistence` writes a distinct color per device with the
+save-to-device policy and prints the assignment. The user then shuts down
+fully (Fast Startup would hibernate the kernel instead) and reads the colors
+during POST: a device showing its probe color keeps lighting in its own
+memory and can carry the boot lighting.
 
 ### Persistence policy
 
@@ -240,8 +259,8 @@ docs/
 
 1. **Scaffold** (done): workspace, domain, config store, engine, protocol client, service and CLI skeletons, all unit tested.
 2. **Static color end to end** (done): controller descriptions and mode/LED updates over the SDK protocol, the `LightingDevice` adapter for OpenRGB, controller-to-alias matching, a service runtime that connects with retry, applies the active profile and follows the configuration file; `argb devices list`.
-3. **Device discovery** (this branch, [issue 2](https://github.com/Kalisen/argb-controller/issues/2)): `argb devices scan` compares the controllers the backends report with the configured devices, appends a default entry for each new one (alias derived from the reported name, no overrides), and the running service applies the result through the configuration reload.
-4. **Sleep and boot**: power event handling, hardware pulse mapping, save-to-device, `argb probe-persistence`.
+3. **Device discovery** (done, [issue 2](https://github.com/Kalisen/argb-controller/issues/2)): `argb devices scan` compares the controllers the backends report with the configured devices, appends a default entry for each new one (alias derived from the reported name, no overrides), and the running service applies the result through the configuration reload.
+4. **Sleep and boot** (this branch): synchronous suspend handling, pre-shutdown boot lighting, unattended applies, `argb apply`, `argb probe-persistence`.
 5. **Synchronized pulse**: direct-mode streaming at 30 Hz with one clock.
 6. **Installer**: `argb service install`, directory ACLs, OpenRGB dependency check.
 7. **Phase 2**: Govee BLE backend.

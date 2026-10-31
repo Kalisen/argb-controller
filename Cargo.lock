@@ -85,6 +85,7 @@ dependencies = [
  "argb-backend-openrgb",
  "argb-config",
  "argb-domain",
+ "argb-engine",
  "clap",
 ]
 

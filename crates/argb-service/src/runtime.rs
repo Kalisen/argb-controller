@@ -1,14 +1,13 @@
 //! The service body: keeps an engine connected to OpenRGB, follows the
 //! configuration file, and applies the requested power state.
 
-use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::Context;
-use argb_backend_openrgb::{OpenRgbClient, OpenRgbDevice, assign_aliases};
+use argb_backend_openrgb::{OpenRgbClient, OpenRgbDevice, open_devices};
 use argb_config::{ConfigFile, ConfigStore};
 use argb_domain::PowerState;
-use argb_engine::{DEFAULT_TICK_RATE_HZ, DeviceError, Engine, Persist};
+use argb_engine::{Attendance, DEFAULT_TICK_RATE_HZ, DeviceError, Engine, Persist};
 use tracing::{error, info, warn};
 
 /// Name the service registers with the OpenRGB server.
@@ -21,6 +20,9 @@ pub const CONFIG_POLL_INTERVAL: Duration = Duration::from_secs(1);
 pub const TICK_INTERVAL: Duration = Duration::from_millis(1000 / DEFAULT_TICK_RATE_HZ as u64);
 /// Longest wait between runtime checks when nothing is pulsing.
 pub const IDLE_INTERVAL: Duration = Duration::from_millis(500);
+/// Pause after the host wakes before devices are driven again, so that
+/// OpenRGB and the buses underneath it have re-initialized.
+pub const RESUME_SETTLE: Duration = Duration::from_secs(2);
 
 type OpenRgbEngine = Engine<OpenRgbDevice<OpenRgbClient>>;
 
@@ -55,11 +57,30 @@ impl Runtime {
         }
     }
 
-    /// Moves every device to `state`.
+    /// Moves every device to `state`. Entering the active state from sleep
+    /// waits [`RESUME_SETTLE`] first.
     pub fn enter_state(&mut self, state: PowerState) {
         info!(%state, "entering state");
+        if state == PowerState::Active && self.desired_state == PowerState::Sleep {
+            std::thread::sleep(RESUME_SETTLE);
+        }
         self.desired_state = state;
         self.apply();
+    }
+
+    /// Writes the boot lighting to device memory: the state `[boot] follow`
+    /// names, realized with hardware effects only, since no host will be
+    /// running. Call on shutdown before stopping.
+    pub fn prepare_for_shutdown(&mut self) {
+        let state = self.config.boot.follow;
+        info!(%state, "writing boot lighting to device memory");
+        self.desired_state = state;
+        let Some(engine) = self.engine.as_mut() else {
+            warn!("OpenRGB not connected; boot lighting left as last saved");
+            return;
+        };
+        let errors = engine.apply_state(state, Persist::SaveToDevice, Attendance::Unattended);
+        self.handle_errors(&errors);
     }
 
     /// Housekeeping: reconnects when disconnected, and after a configuration
@@ -141,37 +162,14 @@ impl Runtime {
 
     fn build_engine(&self) -> anyhow::Result<OpenRgbEngine> {
         let settings = &self.config.openrgb;
-        let mut client = OpenRgbClient::connect(&settings.host, settings.port, CLIENT_NAME)
+        let profile = self.config.to_profile();
+        let devices = open_devices(&settings.host, settings.port, CLIENT_NAME, &profile)
             .with_context(|| {
                 format!(
                     "connecting to OpenRGB at {}:{}",
                     settings.host, settings.port
                 )
             })?;
-        let controllers = client
-            .controllers()
-            .context("listing OpenRGB controllers")?;
-        let profile = self.config.to_profile();
-        let client = Arc::new(Mutex::new(client));
-        let devices = assign_aliases(&profile, &controllers)
-            .into_iter()
-            .map(|assignment| {
-                let description = controllers[assignment.index as usize].clone();
-                info!(
-                    index = assignment.index,
-                    alias = %assignment.alias,
-                    name = %description.name,
-                    configured = assignment.configured,
-                    "controller mapped"
-                );
-                OpenRgbDevice::new(
-                    assignment.alias,
-                    assignment.index,
-                    description,
-                    Arc::clone(&client),
-                )
-            })
-            .collect();
         Ok(Engine::new(profile, devices))
     }
 
@@ -180,7 +178,8 @@ impl Runtime {
             return;
         };
         let persist = Persist::for_state(self.desired_state, self.config.boot.follow);
-        let errors = engine.apply_state(self.desired_state, persist);
+        let attendance = Attendance::for_state(self.desired_state);
+        let errors = engine.apply_state(self.desired_state, persist, attendance);
         self.handle_errors(&errors);
     }
 
