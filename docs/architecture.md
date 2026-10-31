@@ -108,7 +108,9 @@ until the run loop reports the devices updated (or 1.8 s pass), because
 Windows may cut power as soon as the handler returns. The sleep profile is
 applied unattended: hardware effects only, saved to device memory. On resume
 the service waits two seconds for OpenRGB and the buses to come back, then
-applies the active profile. On pre-shutdown (or shutdown, when pre-shutdown
+applies the active profile, and applies it again 10 s and 30 s later: the
+Gigabyte board's USB controller was seen falling back to its firmware
+rainbow seconds after the first write. On pre-shutdown (or shutdown, when pre-shutdown
 is not delivered) it applies the state named by `[boot] follow`, again
 unattended and saved, so that POST shows it.
 
