@@ -77,7 +77,20 @@ impl Runtime {
             std::thread::sleep(RESUME_SETTLE);
         }
         self.apply();
-        self.rescan_due = resuming.then(|| Instant::now() + RESUME_RESCAN_DELAY);
+        // Windows reports a resume twice (automatic, then user-triggered);
+        // the second report must not cancel the re-detection the first
+        // scheduled, so only a change of state touches it.
+        if resuming {
+            self.rescan_due = Some(Instant::now() + RESUME_RESCAN_DELAY);
+        } else if state == PowerState::Sleep {
+            self.rescan_due = None;
+        }
+    }
+
+    /// Whether a post-resume re-detection is scheduled.
+    #[cfg(test)]
+    fn rescan_pending(&self) -> bool {
+        self.rescan_due.is_some()
     }
 
     /// Makes OpenRGB detect its hardware again, then reconnects so the
@@ -258,5 +271,33 @@ fn load_or_starter(store: &ConfigStore) -> ConfigFile {
             warn!(path = %store.path().display(), %error, "configuration unavailable; using the starter defaults");
             ConfigFile::starter()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn runtime_in(state: PowerState) -> Runtime {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ConfigStore::new(dir.path().join("missing.toml"));
+        Runtime::new(store, state)
+    }
+
+    #[test]
+    fn repeated_resume_reports_keep_the_scheduled_rescan() {
+        let mut runtime = runtime_in(PowerState::Sleep);
+        runtime.enter_state(PowerState::Active);
+        assert!(runtime.rescan_pending());
+        runtime.enter_state(PowerState::Active);
+        assert!(runtime.rescan_pending());
+    }
+
+    #[test]
+    fn going_back_to_sleep_cancels_the_rescan() {
+        let mut runtime = runtime_in(PowerState::Sleep);
+        runtime.enter_state(PowerState::Active);
+        runtime.enter_state(PowerState::Sleep);
+        assert!(!runtime.rescan_pending());
     }
 }
