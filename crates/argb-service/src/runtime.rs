@@ -62,8 +62,10 @@ impl Runtime {
         self.apply();
     }
 
-    /// Housekeeping: reloads a changed configuration and reconnects when
-    /// disconnected. Call before each wait.
+    /// Housekeeping: reconnects when disconnected, and after a configuration
+    /// change drops the engine so the next call rebuilds it from the new
+    /// configuration and the server's current device list. Call before each
+    /// wait.
     pub fn poll(&mut self) {
         if self.last_config_poll.elapsed() >= CONFIG_POLL_INTERVAL {
             self.last_config_poll = Instant::now();
@@ -109,16 +111,14 @@ impl Runtime {
         self.config_modified = modified;
         match self.store.load() {
             Ok(config) => {
-                info!(path = %self.store.path().display(), "configuration changed; reapplying");
-                let connection_changed = config.openrgb != self.config.openrgb;
+                info!(path = %self.store.path().display(), "configuration changed; reconnecting");
                 self.config = config;
-                if connection_changed {
-                    self.engine = None;
-                    self.last_connect_attempt = None;
-                } else if let Some(engine) = self.engine.as_mut() {
-                    engine.set_profile(self.config.to_profile());
-                    self.apply();
-                }
+                // Rebuild the engine rather than swap the profile: the device
+                // set depends on the configuration (aliases, selectors) and
+                // on what the server reports now, which `argb devices scan`
+                // may just have changed. Reconnecting over loopback is cheap.
+                self.engine = None;
+                self.last_connect_attempt = None;
             }
             Err(error) => {
                 warn!(path = %self.store.path().display(), %error, "configuration unreadable; keeping the previous one");

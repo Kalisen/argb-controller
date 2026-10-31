@@ -5,10 +5,13 @@
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use anyhow::{Context, bail};
 use argb_backend_openrgb::protocol::{ColorMode, mode_flags};
-use argb_backend_openrgb::{ControllerDescription, ModeMap, OpenRgbClient, assign_aliases};
+use argb_backend_openrgb::{
+    ControllerDescription, ModeMap, OpenRgbClient, assign_aliases, new_devices,
+};
 use argb_config::{ConfigError, ConfigFile, ConfigStore, DeviceSchema, OpenRgbSettings, paths};
 use argb_domain::{Backend, Brightness, DeviceAlias, LightingMode, PowerState, PulsePeriod, Rgb};
 use clap::{Args, Parser, Subcommand, ValueEnum};
@@ -54,6 +57,17 @@ enum DevicesCommand {
     Show {
         /// Controller index as printed by `devices list`.
         index: u32,
+    },
+    /// Add a configuration entry for every controller OpenRGB reports that
+    /// no configured device matches. New entries have no overrides, so they
+    /// follow the state defaults; the running service picks the file up.
+    Scan {
+        /// Ask OpenRGB to detect hardware again before scanning.
+        #[arg(long)]
+        rescan: bool,
+        /// Print what would be added without writing the configuration.
+        #[arg(long)]
+        dry_run: bool,
     },
 }
 
@@ -112,6 +126,13 @@ enum ConfigCommand {
     RemoveDevice {
         /// Alias of the device.
         alias: String,
+    },
+    /// Give a device a new alias, keeping its selector and overrides.
+    RenameDevice {
+        /// Current alias.
+        alias: String,
+        /// New alias (lower-case letters, digits, '-' or '_').
+        new_alias: String,
     },
 }
 
@@ -213,7 +234,66 @@ fn run_devices(store: &ConfigStore, command: &DevicesCommand) -> anyhow::Result<
     match command {
         DevicesCommand::List => list_devices(&config),
         DevicesCommand::Show { index } => show_device(&config, *index),
+        DevicesCommand::Scan { rescan, dry_run } => scan_devices(store, &config, *rescan, *dry_run),
     }
+}
+
+/// Longest wait for OpenRGB to finish a requested hardware detection.
+const RESCAN_TIMEOUT: Duration = Duration::from_secs(60);
+
+fn scan_devices(
+    store: &ConfigStore,
+    config: &ConfigFile,
+    rescan: bool,
+    dry_run: bool,
+) -> anyhow::Result<()> {
+    let mut client = connect(config)?;
+    if rescan {
+        println!("asking OpenRGB to detect hardware again...");
+        if !client.rescan(RESCAN_TIMEOUT)? {
+            println!(
+                "no device-list notification within {RESCAN_TIMEOUT:?}; scanning what is listed now"
+            );
+        }
+    }
+    let controllers = client.controllers()?;
+    let found = new_devices(&config.to_profile(), &controllers);
+    if found.is_empty() {
+        println!("every controller OpenRGB reports is already configured");
+        return Ok(());
+    }
+    for device in &found {
+        println!(
+            "{:>5}  {:<34}{}",
+            device.index, device.alias, device.match_name
+        );
+    }
+    if dry_run {
+        println!("{} new device(s); nothing written (--dry-run)", found.len());
+        return Ok(());
+    }
+    if !store.exists() {
+        store.save(&ConfigFile::starter())?;
+    }
+    store.update(|config| {
+        for device in &found {
+            config.devices.insert(
+                device.alias.clone(),
+                DeviceSchema {
+                    backend: Backend::OpenRgb,
+                    match_name: device.match_name.clone(),
+                    states: BTreeMap::new(),
+                },
+            );
+        }
+        Ok(())
+    })?;
+    println!(
+        "added {} device(s) to {}; a running service applies them within a second",
+        found.len(),
+        store.path().display()
+    );
+    Ok(())
 }
 
 fn connect(config: &ConfigFile) -> anyhow::Result<OpenRgbClient> {
@@ -388,6 +468,23 @@ fn run_config(store: &ConfigStore, command: ConfigCommand) -> anyhow::Result<()>
                 existing_device(config, &alias)?
                     .states
                     .remove(&state.into());
+                Ok(())
+            })?;
+        }
+        ConfigCommand::RenameDevice { alias, new_alias } => {
+            let alias = DeviceAlias::new(alias)?;
+            let new_alias = DeviceAlias::new(new_alias)?;
+            store.update(|config| {
+                if config.devices.contains_key(&new_alias) {
+                    return Err(ConfigError::Invalid(format!(
+                        "a device with alias '{new_alias}' already exists"
+                    )));
+                }
+                let device = config
+                    .devices
+                    .remove(&alias)
+                    .ok_or_else(|| unknown_device(&alias))?;
+                config.devices.insert(new_alias.clone(), device);
                 Ok(())
             })?;
         }

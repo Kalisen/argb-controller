@@ -179,9 +179,26 @@ section reconnects.
 
 ### Configuration reload
 
-The service watches the configuration file and reapplies the current state
-when the file changes. This keeps the CLI decoupled from the service: the CLI
-needs no control channel, and a hand edit works the same way.
+The service watches the configuration file and, when it changes, drops its
+engine and rebuilds it from the new configuration and the server's current
+device list, then reapplies the current state. This keeps the CLI decoupled
+from the service: the CLI needs no control channel, and a hand edit works
+the same way. Rebuilding rather than swapping the profile means a changed
+selector or a device added by `argb devices scan` takes effect without a
+restart, at the cost of one loopback reconnection.
+
+### Device discovery
+
+`argb devices scan` runs the same matching as the service, keeps every
+controller no configured device claims, and appends an entry for each:
+alias derived from the reported name, `match_name` set to the full reported
+name, no overrides. New devices therefore follow the state defaults until
+the user tunes them (`argb config rename-device`, `set-device-mode`). Two
+controllers with the same name (the two RAM sticks) get the same
+`match_name` and distinct aliases; the service binds them in index order,
+which is stable for fixed hardware. `--rescan` first asks OpenRGB to detect
+hardware again and waits for its device-list notification, for hardware
+plugged in since OpenRGB started; `--dry-run` prints without writing.
 
 ## Security considerations
 
@@ -222,8 +239,8 @@ docs/
 ## Milestones
 
 1. **Scaffold** (done): workspace, domain, config store, engine, protocol client, service and CLI skeletons, all unit tested.
-2. **Static color end to end** (this branch): controller descriptions and mode/LED updates over the SDK protocol, the `LightingDevice` adapter for OpenRGB, controller-to-alias matching, a service runtime that connects with retry, applies the active profile and follows the configuration file; `argb devices list`.
-3. **Device discovery** ([issue 2](https://github.com/Kalisen/argb-controller/issues/2)): `argb devices scan` compares the controllers the backends report with the configured devices, appends a default entry for each new one (alias derived from the reported name, no overrides), and the running service applies the result through the configuration reload.
+2. **Static color end to end** (done): controller descriptions and mode/LED updates over the SDK protocol, the `LightingDevice` adapter for OpenRGB, controller-to-alias matching, a service runtime that connects with retry, applies the active profile and follows the configuration file; `argb devices list`.
+3. **Device discovery** (this branch, [issue 2](https://github.com/Kalisen/argb-controller/issues/2)): `argb devices scan` compares the controllers the backends report with the configured devices, appends a default entry for each new one (alias derived from the reported name, no overrides), and the running service applies the result through the configuration reload.
 4. **Sleep and boot**: power event handling, hardware pulse mapping, save-to-device, `argb probe-persistence`.
 5. **Synchronized pulse**: direct-mode streaming at 30 Hz with one clock.
 6. **Installer**: `argb service install`, directory ACLs, OpenRGB dependency check.

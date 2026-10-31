@@ -111,7 +111,7 @@ pub struct DeviceSchema {
     /// Case-insensitive substring of the backend's reported device name.
     pub match_name: String,
     /// `[devices.<alias>.states.<state>]` overrides.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub states: BTreeMap<PowerState, LightingMode>,
 }
 
@@ -214,6 +214,23 @@ impl ConfigFile {
 mod tests {
     use super::*;
     use argb_domain::{Brightness, Rgb};
+
+    #[test]
+    fn a_device_without_overrides_serializes_without_a_states_table() {
+        let mut config = ConfigFile::starter();
+        config.devices.insert(
+            DeviceAlias::new("ram").unwrap(),
+            DeviceSchema {
+                backend: Backend::OpenRgb,
+                match_name: "Vengeance".into(),
+                states: BTreeMap::new(),
+            },
+        );
+        let text = config.to_toml().unwrap();
+        assert!(text.contains("[devices.ram]"));
+        assert!(!text.contains("[devices.ram.states]"));
+        assert_eq!(ConfigFile::parse(&text).unwrap(), config);
+    }
 
     const EXAMPLE: &str = include_str!("../../../config.example.toml");
 

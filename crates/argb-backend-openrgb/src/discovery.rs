@@ -71,6 +71,39 @@ pub fn assign_aliases(
     assignments
 }
 
+/// A controller that no configured device claims.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewDevice {
+    /// Alias derived from the reported name, unique among configured and
+    /// other derived aliases.
+    pub alias: DeviceAlias,
+    /// Name the server reports; stored as `match_name` so the device is
+    /// found again on the next connection.
+    pub match_name: String,
+    /// Controller index at the time of the scan.
+    pub index: u32,
+}
+
+/// Controllers that the profile does not name, with the entry each should
+/// get in the configuration. Two controllers reporting the same name get the
+/// same `match_name` and distinct aliases; the service binds them in index
+/// order, which is stable for a given set of hardware.
+#[must_use]
+pub fn new_devices(
+    profile: &LightingProfile,
+    controllers: &[ControllerDescription],
+) -> Vec<NewDevice> {
+    assign_aliases(profile, controllers)
+        .into_iter()
+        .filter(|assignment| !assignment.configured)
+        .map(|assignment| NewDevice {
+            match_name: controllers[assignment.index as usize].name.clone(),
+            alias: assignment.alias,
+            index: assignment.index,
+        })
+        .collect()
+}
+
 #[expect(
     clippy::maybe_infinite_iter,
     reason = "taken is finite, so some counter is always free"
@@ -187,6 +220,33 @@ mod tests {
                 (2, "corsair-vengeance-rgb-ddr5-2", false)
             ]
         );
+    }
+
+    #[test]
+    fn new_devices_are_the_unconfigured_controllers_with_their_reported_names() {
+        let profile = profile(&[("ram", Backend::OpenRgb, "vengeance")]);
+        let controllers = [
+            named("Corsair Vengeance RGB DDR5"),
+            named("Corsair Vengeance RGB DDR5"),
+            named("ASUS TUF RTX 4080"),
+        ];
+        let found = new_devices(&profile, &controllers);
+        assert_eq!(
+            found,
+            vec![
+                NewDevice {
+                    alias: DeviceAlias::new("corsair-vengeance-rgb-ddr5").unwrap(),
+                    match_name: "Corsair Vengeance RGB DDR5".into(),
+                    index: 1,
+                },
+                NewDevice {
+                    alias: DeviceAlias::new("asus-tuf-rtx-4080").unwrap(),
+                    match_name: "ASUS TUF RTX 4080".into(),
+                    index: 2,
+                },
+            ]
+        );
+        assert!(new_devices(&profile, &controllers[..1]).is_empty());
     }
 
     #[test]
