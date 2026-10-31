@@ -94,9 +94,12 @@ its WinRT backend:
 - `argb-ble-probe connect --name H6076 --layout lamp --color 40e0d0`: the
   lamp completes the handshake and acknowledges power and color.
 
-Open: Bluetooth LE from session 0 as `LocalService`. Nothing published says
-whether the WinRT Bluetooth APIs work there. Test from an elevated prompt,
-with the Govee app closed:
+Bluetooth LE from session 0 as `LocalService`: verified the same day. The
+probe installed as a service scanned 15 peripherals, connected to the Hexa,
+completed the exchange and painted it, with nothing published beforehand to
+say the WinRT Bluetooth APIs would work there. The backend can therefore live
+inside the service. To repeat the test from an elevated prompt, with the
+Govee app closed:
 
 ```
 cargo build --release -p argb-ble-probe
@@ -108,9 +111,7 @@ Get-Content "$env:ProgramData\argb-controller\logs\ble-probe.log"
 
 The service copies the probe beside the argb-controller binaries, runs the
 same scan and connect once under `LocalService`, and writes its log beside
-the service logs. A log ending in `probe finished` with the Hexa in orange
-answers the question; `no Bluetooth adapter available` or a connect error
-means the backend needs a helper in the user session instead.
+the service logs; it ends in `probe finished`.
 
 ## Backend design
 
