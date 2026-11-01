@@ -190,7 +190,7 @@ enum ConfigCommand {
     },
     /// Override the mode a device shows in one power state.
     SetDeviceMode {
-        /// Alias of an existing device.
+        /// Alias of an existing device, or its name as scanned or its `match_name`.
         alias: String,
         /// Power state to override.
         #[arg(long, value_enum)]
@@ -200,7 +200,7 @@ enum ConfigCommand {
     },
     /// Remove a device's override for one state, so it follows the default again.
     ClearDeviceMode {
-        /// Alias of an existing device.
+        /// Alias of an existing device, or its name as scanned or its `match_name`.
         alias: String,
         /// Power state whose override is removed.
         #[arg(long, value_enum)]
@@ -208,12 +208,12 @@ enum ConfigCommand {
     },
     /// Remove a device entirely.
     RemoveDevice {
-        /// Alias of the device.
+        /// Alias of the device, or its name as scanned or its `match_name`.
         alias: String,
     },
     /// Give a device a new alias, keeping its selector and overrides.
     RenameDevice {
-        /// Current alias.
+        /// Current alias, or the name as scanned or the `match_name`.
         alias: String,
         /// New alias (lower-case letters, digits, '-' or '_').
         new_alias: String,
@@ -816,9 +816,9 @@ fn run_config(store: &ConfigStore, command: ConfigCommand) -> anyhow::Result<()>
             })?;
         }
         ConfigCommand::SetDeviceMode { alias, state, mode } => {
-            let alias = DeviceAlias::new(alias)?;
             let mode = mode.into_mode()?;
             store.update(|config| {
+                let alias = named_device(config, &alias)?;
                 existing_device(config, &alias)?
                     .states
                     .insert(state.into(), mode);
@@ -826,8 +826,8 @@ fn run_config(store: &ConfigStore, command: ConfigCommand) -> anyhow::Result<()>
             })?;
         }
         ConfigCommand::ClearDeviceMode { alias, state } => {
-            let alias = DeviceAlias::new(alias)?;
             store.update(|config| {
+                let alias = named_device(config, &alias)?;
                 existing_device(config, &alias)?
                     .states
                     .remove(&state.into());
@@ -835,9 +835,9 @@ fn run_config(store: &ConfigStore, command: ConfigCommand) -> anyhow::Result<()>
             })?;
         }
         ConfigCommand::RenameDevice { alias, new_alias } => {
-            let alias = DeviceAlias::new(alias)?;
             let new_alias = DeviceAlias::new(new_alias)?;
             store.update(|config| {
+                let alias = named_device(config, &alias)?;
                 if config.devices.contains_key(&new_alias) {
                     return Err(ConfigError::Invalid(format!(
                         "a device with alias '{new_alias}' already exists"
@@ -852,8 +852,8 @@ fn run_config(store: &ConfigStore, command: ConfigCommand) -> anyhow::Result<()>
             })?;
         }
         ConfigCommand::RemoveDevice { alias } => {
-            let alias = DeviceAlias::new(alias)?;
             store.update(|config| {
+                let alias = named_device(config, &alias)?;
                 if config.devices.remove(&alias).is_none() {
                     return Err(unknown_device(&alias));
                 }
@@ -862,6 +862,17 @@ fn run_config(store: &ConfigStore, command: ConfigCommand) -> anyhow::Result<()>
         }
     }
     Ok(())
+}
+
+/// The alias of the device the user named: the alias itself, the name the
+/// device was scanned under, or its `match_name`. Says which alias was
+/// chosen when it differs from what was typed.
+fn named_device(config: &ConfigFile, text: &str) -> Result<DeviceAlias, ConfigError> {
+    let alias = config.resolve_alias(text)?;
+    if alias.as_str() != text {
+        println!("device '{alias}' (named as '{text}')");
+    }
+    Ok(alias)
 }
 
 fn existing_device<'a>(

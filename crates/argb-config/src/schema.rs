@@ -161,6 +161,66 @@ impl ConfigFile {
         Ok(())
     }
 
+    /// The configured device a user named on the command line.
+    ///
+    /// Accepts, in this order: the alias itself; the device whose
+    /// `match_name` equals the text, case-insensitively, when exactly one
+    /// does; and the alias derived from the text the way `argb devices scan`
+    /// derives it, so a device can be named by the name it was scanned under
+    /// (`Govee_H6061_7867` finds `govee-h6061-7867`).
+    ///
+    /// # Errors
+    /// [`ConfigError::Invalid`] listing the candidates when several devices
+    /// share the `match_name` (the two RAM sticks), or naming the text and
+    /// listing the configured aliases when nothing matches.
+    pub fn resolve_alias(&self, text: &str) -> Result<DeviceAlias, ConfigError> {
+        let text = text.trim();
+        if let Ok(alias) = DeviceAlias::new(text)
+            && self.devices.contains_key(&alias)
+        {
+            return Ok(alias);
+        }
+        let by_match_name: Vec<&DeviceAlias> = self
+            .devices
+            .iter()
+            .filter(|(_, device)| device.match_name.eq_ignore_ascii_case(text))
+            .map(|(alias, _)| alias)
+            .collect();
+        match by_match_name.as_slice() {
+            [alias] => return Ok((*alias).clone()),
+            [] => {}
+            several => {
+                return Err(ConfigError::Invalid(format!(
+                    "'{text}' names several devices, use one of their aliases: {}",
+                    several
+                        .iter()
+                        .map(|alias| alias.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )));
+            }
+        }
+        let derived = DeviceAlias::derive_from(text);
+        if self.devices.contains_key(&derived) {
+            return Ok(derived);
+        }
+        Err(ConfigError::Invalid(format!(
+            "no device named '{text}'; configured devices: {}",
+            self.alias_list()
+        )))
+    }
+
+    fn alias_list(&self) -> String {
+        if self.devices.is_empty() {
+            return "none".to_owned();
+        }
+        self.devices
+            .keys()
+            .map(DeviceAlias::as_str)
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
     /// Converts the document into the domain profile.
     #[must_use]
     pub fn to_profile(&self) -> LightingProfile {
@@ -300,5 +360,74 @@ mod tests {
     #[test]
     fn starter_is_valid() {
         ConfigFile::starter().validate().unwrap();
+    }
+
+    fn with_devices(entries: &[(&str, Backend, &str)]) -> ConfigFile {
+        let mut config = ConfigFile::starter();
+        for (alias, backend, match_name) in entries {
+            config.devices.insert(
+                DeviceAlias::new(*alias).unwrap(),
+                DeviceSchema {
+                    backend: *backend,
+                    match_name: (*match_name).to_owned(),
+                    states: BTreeMap::new(),
+                },
+            );
+        }
+        config
+    }
+
+    #[test]
+    fn a_device_is_resolved_by_alias_scanned_name_or_match_name() {
+        let config = with_devices(&[
+            ("govee-h6061-7867", Backend::GoveeBle, "Govee_H6061_7867"),
+            (
+                "gpu",
+                Backend::OpenRgb,
+                "ASUS TUF GeForce RTX 4080 Gaming OC",
+            ),
+        ]);
+        let hexa = DeviceAlias::new("govee-h6061-7867").unwrap();
+        assert_eq!(config.resolve_alias("govee-h6061-7867").unwrap(), hexa);
+        assert_eq!(config.resolve_alias("Govee_H6061_7867").unwrap(), hexa);
+        assert_eq!(
+            config
+                .resolve_alias("asus tuf geforce rtx 4080 gaming oc")
+                .unwrap()
+                .as_str(),
+            "gpu"
+        );
+    }
+
+    #[test]
+    fn an_unknown_device_lists_the_configured_ones() {
+        let config = with_devices(&[("gpu", Backend::OpenRgb, "TUF")]);
+        let error = config.resolve_alias("Mouse").unwrap_err().to_string();
+        assert!(error.contains("no device named 'Mouse'"), "{error}");
+        assert!(error.contains("gpu"), "{error}");
+    }
+
+    #[test]
+    fn a_match_name_shared_by_several_devices_is_ambiguous() {
+        let config = with_devices(&[
+            (
+                "corsair-vengeance-rgb-ddr5",
+                Backend::OpenRgb,
+                "Corsair Vengeance RGB DDR5",
+            ),
+            (
+                "corsair-vengeance-rgb-ddr5-2",
+                Backend::OpenRgb,
+                "Corsair Vengeance RGB DDR5",
+            ),
+        ]);
+        let error = config
+            .resolve_alias("Corsair Vengeance RGB DDR5")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("corsair-vengeance-rgb-ddr5, corsair-vengeance-rgb-ddr5-2"),
+            "{error}"
+        );
     }
 }

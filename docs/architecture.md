@@ -330,9 +330,15 @@ restart, at the cost of one loopback reconnection.
 controller no configured device claims, and appends an entry for each:
 alias derived from the reported name, `match_name` set to the full reported
 name, no overrides. New devices therefore follow the state defaults until
-the user tunes them (`argb config rename-device`, `set-device-mode`). Two
+the user tunes them (`argb config rename-device`, `set-device-mode`). The
+commands that take an existing device accept its alias, the name it was
+scanned under (`Govee_H6061_7867` resolves to `govee-h6061-7867`, the alias
+the scan derived from it) or its `match_name`, compared case-insensitively;
+the resolution lives in `argb-config` ([issue
+13](https://github.com/Kalisen/argb-controller/issues/13)). Two
 controllers with the same name (the two RAM sticks) get the same
-`match_name` and distinct aliases; the service binds them in index order,
+`match_name` and distinct aliases; naming one by that `match_name` is
+refused as ambiguous, and the service binds them in index order,
 which is stable for fixed hardware. `--rescan` first asks OpenRGB to detect
 hardware again and waits for its device-list notification, for hardware
 plugged in since OpenRGB started; `--dry-run` prints without writing.
