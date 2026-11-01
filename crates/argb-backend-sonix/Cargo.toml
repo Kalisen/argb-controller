@@ -1,0 +1,18 @@
+[package]
+name = "argb-backend-sonix"
+description = "Sonix OEM keyboard backend: the HID feature-report protocol of the Cloud Nine C959, one link per keyboard and the LightingDevice adapter"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+argb-domain = { workspace = true }
+argb-engine = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+hidapi = { workspace = true }
+
+[lints]
+workspace = true

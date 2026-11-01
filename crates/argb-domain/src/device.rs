@@ -12,6 +12,8 @@ pub enum Backend {
     OpenRgb,
     /// Govee devices reached over Bluetooth LE (Phase 2).
     GoveeBle,
+    /// Sonix OEM keyboards driven over USB HID (Phase 2.1).
+    Sonix,
 }
 
 impl std::fmt::Display for Backend {
@@ -19,6 +21,7 @@ impl std::fmt::Display for Backend {
         match self {
             Backend::OpenRgb => f.write_str("openrgb"),
             Backend::GoveeBle => f.write_str("govee_ble"),
+            Backend::Sonix => f.write_str("sonix"),
         }
     }
 }

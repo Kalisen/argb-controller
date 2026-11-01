@@ -2,10 +2,11 @@
 
 ## Overview
 
-The system is a Rust workspace of seven crates arranged by domain. Business
+The system is a Rust workspace of eight crates arranged by domain. Business
 rules sit in the inner crates and know nothing about files, sockets, radios or
 Windows. The outer crates adapt those rules to the configuration file, the
-OpenRGB SDK, Bluetooth LE, the Service Control Manager and the command line.
+OpenRGB SDK, Bluetooth LE, USB HID, the Service Control Manager and the
+command line.
 
 ```mermaid
 flowchart LR
@@ -21,10 +22,12 @@ flowchart LR
     DOM["argb-domain<br/>colors, modes, states, profile"]:::domain
     ORGB["argb-backend-openrgb<br/>SDK client, device adapter"]:::adapter
     GOV["argb-backend-govee<br/>BLE runtime, frames, device adapter"]:::adapter
+    SNX["argb-backend-sonix<br/>HID feature reports, lighting block, device adapter"]:::adapter
     FILE[("config.toml")]:::external
     SERVER["OpenRGB SDK server<br/>127.0.0.1:6742"]:::external
-    HW["Motherboard + headers<br/>DDR5 RAM, GPU"]:::external
+    HW["Motherboard + headers<br/>DDR5 RAM, GPU, G203 mouse"]:::external
     BLE["Govee H6061 / H6076"]:::external
+    KBD["Cloud Nine C959 keyboard"]:::external
 
     CLI --> CFG
     SVC --> CFG
@@ -33,12 +36,15 @@ flowchart LR
     CFG --> DOM
     ORGB -.implements LightingDevice.-> ENG
     GOV -.implements LightingDevice.-> ENG
+    SNX -.implements LightingDevice.-> ENG
     SVC --> ORGB
     SVC --> GOV
+    SVC --> SNX
     CFG <--> FILE
     ORGB <-->|TCP| SERVER
     SERVER --> HW
     GOV <-->|BLE| BLE
+    SNX <-->|USB HID| KBD
 ```
 
 ## Crates
@@ -50,8 +56,9 @@ flowchart LR
 | `argb-engine` | The `LightingDevice` trait, the `Engine` that applies a state to devices, and the `PulseWaveform` sampled from one clock. | domain |
 | `argb-backend-openrgb` | OpenRGB SDK protocol, blocking TCP client, and `LightingDevice` for each OpenRGB controller. | domain, engine |
 | `argb-backend-govee` | Govee Bluetooth LE frames and channel cipher, the supported models, a shared Bluetooth runtime with one link per light, `LightingDevice` for each configured light, and the scan behind `argb devices scan`. | domain, engine |
+| `argb-backend-sonix` | The Sonix OEM keyboard protocol (feature-report commands, the write session, the lighting block), the supported models by USB id, one HID link per keyboard, `LightingDevice` for each configured keyboard, and the enumeration behind `argb devices scan`. | domain, engine |
 | `argb-service` | Windows Service entry point, power event handling, config reload, run loop. | all of the above |
-| `argb-cli` | `argb config ...`, `argb devices ...`, `argb apply`, `argb probe-persistence` and `argb service ...` commands. | domain, config, engine, both backends, service |
+| `argb-cli` | `argb config ...`, `argb devices ...`, `argb apply`, `argb probe-persistence` and `argb service ...` commands. | domain, config, engine, the three backends, service |
 
 ## Key decisions
 
@@ -240,13 +247,14 @@ until then.
 
 The service connects to OpenRGB at start and retries every 5 seconds until
 the SDK server answers, so start order between the two services does not
-matter. The engine holds the OpenRGB controllers and the configured Govee
-lights behind one `Box<dyn LightingDevice>` list, and the service sorts
-backend errors by the backend the failing alias belongs to. An OpenRGB error
-while applying a state or streaming a pulse frame means the server
-connection is gone: the service drops it, and the next poll reconnects and
-reapplies the desired state. A Govee error means one light is off, out of
-range or busy: the engine remembers which devices failed, and the service
+matter. The engine holds the OpenRGB controllers, the configured Govee
+lights and the configured keyboards behind one `Box<dyn LightingDevice>`
+list, and the service sorts backend errors by the backend the failing alias
+belongs to. An OpenRGB error while applying a state or streaming a pulse
+frame means the server connection is gone: the service drops it, and the
+next poll reconnects and reapplies the desired state. A Govee or Sonix
+error means one light is off, out of range or busy, or a keyboard is
+unplugged: the engine remembers which devices failed, and the service
 retries those alone 10 seconds later, while the rest keep their state. The
 configuration file's modification time is checked once a second; a change
 reloads the profile and reapplies, and a change to the `[openrgb]` section
@@ -281,6 +289,31 @@ the engine's existing rule. The frames, the AES/RC4 channel cipher, the
 pre-shared key and the per-model segment masks are documented with their
 sources in `docs/phase2-govee-ble.md`.
 
+### Sonix keyboards over USB HID
+
+Each configured `sonix` device is one `SonixDevice` over a `HidLink`. The
+link opens the keyboard's control collection (the plain keyboard collection
+on interface 0) through `hidapi` on first use and keeps the handle; a
+failed write drops it, so the next apply enumerates again and finds a
+replugged keyboard. Nothing is opened at engine build time, so a keyboard
+unplugged at service start is picked up by the retry.
+
+Every apply is one write session of the keyboard's 18-page lighting block:
+begin, select the lighting section, the pages, commit, apply, each command
+acknowledged by the keyboard's echo and retried up to three times, with
+the 35 ms pacing the vendor application keeps. The block carries the
+application's presets, a black per-key table and the active record for
+the configured mode: the static effect at the brightness level nearest to
+the percentage (zero percent leaves the active record empty, which is how
+the keyboard turns its LEDs off), or the breathing effect at a speed
+derived from the pulse period. The firmware stores the block in flash and
+keeps it across a power cycle, so `Persist` needs no action, the block is
+written only when it differs from the last one written, and the device
+advertises no direct mode: a session takes close to a second and the
+flash would not survive the pulse tick rate. The sleep pulse therefore
+always uses the keyboard's own breathing effect. The protocol, its sources
+and the capture it was read from are in `docs/phase2-1-peripherals.md`.
+
 ### Configuration reload
 
 The service watches the configuration file and, when it changes, drops its
@@ -304,13 +337,16 @@ which is stable for fixed hardware. `--rescan` first asks OpenRGB to detect
 hardware again and waits for its device-list notification, for hardware
 plugged in since OpenRGB started; `--dry-run` prints without writing.
 
-The same command then listens for Govee lights over Bluetooth LE for 8
-seconds and appends an entry (`backend = "govee_ble"`, `match_name` set to
-the advertised name) for each supported model no configured device matches;
-other Govee lights are listed as unsupported. `argb devices list` shows the
-lights heard with their model, support and channel. `--no-bluetooth` skips
-the scan, and a machine without a Bluetooth adapter gets a note rather than
-a failure.
+The same command then enumerates the supported keyboards plugged in and
+appends an entry for each one no configured device matches
+(`backend = "sonix"`, `match_name` set to the reported name, which is the
+model name followed by the USB id), then listens for Govee lights over
+Bluetooth LE for 8 seconds and appends an entry (`backend = "govee_ble"`,
+`match_name` set to the advertised name) for each supported model no
+configured device matches; other Govee lights are listed as unsupported.
+`argb devices list` shows the keyboards plugged in and the lights heard
+with their model, support and channel. `--no-bluetooth` skips the scan, and
+a machine without a Bluetooth adapter gets a note rather than a failure.
 
 ## Security considerations
 
@@ -336,6 +372,13 @@ These are the inputs to the Phase 2.5 review.
   vendor's fixed pre-shared key, already public in the open-source clients
   this backend follows, and the session key lives only in memory. The
   configuration holds advertised names only, never addresses.
+- The keyboard backend opens the keyboard's own HID collection, which
+  Windows lets any process do for feature reports; it only ever writes the
+  lighting block and reads the keyboard's echo of its commands, never key
+  input (the input reports go to the system's keyboard driver, which
+  `hidapi` cannot read). Every write replaces the whole block with values
+  the backend builds, so nothing from the configuration reaches the
+  keyboard but a color, a brightness level and a speed.
 - No `unsafe` code in project crates; the lint forbids it at the workspace level.
 
 ## Repository layout
@@ -349,6 +392,8 @@ crates/
   argb-engine/
   argb-backend-openrgb/
   argb-backend-govee/
+  argb-backend-sonix/
+  argb-sonix-probe/     console spike over the Sonix backend, for protocol experiments
   argb-service/
   argb-cli/
 docs/
@@ -356,7 +401,7 @@ docs/
   architecture.md
   contributing.md
   phase2-govee-ble.md   Govee protocol facts, spike results, backend design
-  phase2-1-peripherals.md   G203 findings and workaround, C959 keyboard identity and capture plan
+  phase2-1-peripherals.md   G203 findings and workaround, C959 keyboard protocol and capture notes
 ```
 
 ## Milestones
@@ -368,6 +413,6 @@ docs/
 5. **Synchronized pulse** (done): direct-mode streaming at 30 Hz with one clock.
 6. **Installer** (done): `argb service install|uninstall|start|stop|status|check`, directory ACL, OpenRGB reachability check.
 7. **Phase 2** (done): Govee BLE backend. A spike settled the protocol, the encrypted channel and Bluetooth from session 0 (`docs/phase2-govee-ble.md`); the `argb-backend-govee` crate drives the Glide Hexa and the Lyra lamp from the service and the CLI, `argb devices scan` adds them, and failed lights are retried without dropping OpenRGB.
-8. **Phase 2.1** (in progress): the G203's static color is an OpenRGB driver defect (`colors_max` left at zero) that the SDK cannot work around; the adapter now also refuses a breathing mode that cannot carry a color, and the fix is reported upstream. The Cloud Nine C959 is a Sonix keyboard (`0C45:8008`) with a vendor-defined HID collection and no published protocol; a USB capture of the vendor app decides whether a backend is possible (`docs/phase2-1-peripherals.md`).
+8. **Phase 2.1** (in progress): the G203's static color is an OpenRGB driver defect (`colors_max` left at zero) that the SDK cannot work around; the adapter now also refuses a breathing mode that cannot carry a color, and the fix is reported upstream. The Cloud Nine C959 is a Sonix keyboard (`0C45:8008`) whose vendor application writes an 18-page lighting block over HID feature reports; a USB capture settled the layout and `argb-backend-sonix` drives the static color, brightness and breathing effect from the service and the CLI (`docs/phase2-1-peripherals.md`). Left to verify on the machine: the keyboard during sleep and POST, and the breathing speed scale.
 9. **Phase 2.5**: security review and fixes.
 10. **Phase 3**: Samsung monitor investigation.

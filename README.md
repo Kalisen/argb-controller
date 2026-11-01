@@ -21,6 +21,13 @@ hears the lights and adds them; a light that is off or out of range is retried w
 PC hardware keeps being driven. See `docs/requirements.md` for the scope,
 `docs/architecture.md` for the design and `docs/phase2-govee-ble.md` for the protocol.
 
+Phase 2.1 covers the USB peripherals. The Logitech G203 mouse was already visible through
+OpenRGB; its static color turned out to be an OpenRGB driver defect, worked around in the
+adapter and reported upstream. The Cloud Nine C959 keyboard is driven directly over USB HID
+with the protocol of its vendor application, captured and documented in
+`docs/phase2-1-peripherals.md`: static color with true brightness while awake, the keyboard's
+own breathing effect for sleep, state kept in its flash.
+
 Running it needs [OpenRGB](https://openrgb.org) 1.1 or later (the PawnIO build) with its SDK
 server enabled on the loopback interface, and a Bluetooth LE adapter for the Govee lights.
 
@@ -52,7 +59,7 @@ removes the registration and leaves the files.
 |---|---|---|
 | 1 | In-machine hardware through [OpenRGB](https://openrgb.org): motherboard and its ARGB headers (fans, AIO), DDR5 RAM, GPU | done |
 | 2 | Govee devices over Bluetooth LE: Glide Hexa panels (H6061), floor lamp (H6076) | done |
-| 2.1 | USB peripherals: Logitech G203 Lightsync mouse (already visible through OpenRGB), Cloud Nine C959 ErgoTKL keyboard (control path to be established) | in progress |
+| 2.1 | USB peripherals: Logitech G203 Lightsync mouse (through OpenRGB), Cloud Nine C959 ErgoTKL keyboard (own Sonix HID backend) | in progress: sleep and boot behavior of the keyboard to verify |
 | 2.5 | Security review of everything implemented so far; every finding is fixed before Phase 3 | |
 | 3 | Samsung Odyssey Neo G9 rear lighting, pending a feasible control path | |
 

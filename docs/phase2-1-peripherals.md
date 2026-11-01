@@ -1,7 +1,7 @@
 # Phase 2.1: USB peripherals
 
-Working notes for the two USB peripherals: what each one exposes, how far it
-can be driven today, and what remains.
+Working notes for the two USB peripherals: what each one exposes, how it is
+driven, and what remains.
 
 ## Logitech G203 Lightsync (mouse)
 
@@ -39,9 +39,9 @@ carries it:
   with the rest.
 - **Sleep**: the mouse loses USB power when the machine sleeps, so nothing
   it shows matters. The adapter no longer selects a Breathing mode that
-  cannot carry a color (this branch), so the sleep lighting written before
-  suspend is the pulse color shown statically over Direct rather than a
-  black breathing.
+  cannot carry a color, so the sleep lighting written before suspend is
+  the pulse color shown statically over Direct rather than a black
+  breathing.
 - **Boot**: OpenRGB cannot write the onboard profile. The mouse shows its
   onboard lighting from power-on until the service applies the active
   state, a few seconds after OpenRGB finishes detecting. Setting that
@@ -61,55 +61,90 @@ a stale handle the same way it does for the motherboard.
 | USB id | `0C45:8008`, revision `0117` (firmware 1.17.00), bus-reported name "USB-Keyboard" |
 | Chip family | Sonix (the vendor id); the app's `device.xml` names `0C45:8006`, the same family as the Svive Tritium and AUKEY KM-G12 |
 | Interfaces | 0: keyboard; 1: consumer control, system control, a second keyboard, a mouse, a vendor-defined collection (usage page `0xFFFF`, usage 1), a multi-axis controller |
+| Control path | 64-byte HID feature reports (report id 0) on the keyboard collection of interface 0, the only collection that acknowledges a command |
 | Vendor app | "The Cloud Nine Keyboard Application" 2.0.1.15, `DeviceDriver.exe`, a generic Sonix OEM configurator (MUI skins, SQLite, `KeyboardLayout.xml` for the C959); Windows only |
-| OpenRGB | not supported. OpenRGB's Sonix keyboards (EVision family) use usage page `0xFF1C`; nothing in OpenRGB matches `0C45:8008` or usage page `0xFFFF` |
+| OpenRGB | not supported. OpenRGB's Sonix keyboards (EVision family) use usage page `0xFF1C`; nothing in OpenRGB matches `0C45:8008` |
 | Windows Dynamic Lighting | no LampArray collection (the G203 has one) |
+| Backend | `argb-backend-sonix`, `backend = "sonix"`; `argb devices scan` adds the keyboard as `cloud-nine-c959-ergotkl` |
 
-The lighting is set from the vendor app or from the keyboard's own keys
-(Fn plus the wheel for brightness). The control path is therefore the
-vendor-defined collection on interface 1, with a protocol nobody has
-published. Establishing it means capturing what the app sends.
+### Protocol
 
-### Capture procedure (next step)
+The same `DeviceDriver.exe` family configures the Ajazz AK820 Pro
+(`0C45:8009`/`8006`) and the AULA F108 Pro, whose protocol two projects
+reverse-engineered: `SpawW/ajazzctl` (`PROTOCOL.md`) and
+`donglover69/sonix-keyboard-studio`. Their framing holds for the C959;
+the lighting payload does not, which a USB capture of the Cloud Nine app
+settled.
 
-USBPcap and Wireshark are installed. From an elevated prompt, with the
-Cloud Nine app closed:
+Framing, confirmed on the C959:
 
-```
-& "C:\Program Files\USBPcap\USBPcapCMD.exe"
-```
+| Element | Value |
+|---|---|
+| Report | feature report, id 0, 64 payload bytes; `SET_REPORT`/`GET_REPORT` with `wValue 0x0300`, `wIndex 0` |
+| Command | payload `04 CMD`, argument at payload byte 8 |
+| Acknowledgement | the next `GET_REPORT` echoes the command with payload byte 3 = `01` (`FF` refuses it) |
+| Pacing | 35 ms between reports; the application retries commands that are not acknowledged |
+| Session | `04 18` begin, `04 13 … COUNT` select the lighting section with its page count at byte 8, COUNT data pages, `04 02` commit (its echo carries two checksum-like bytes), `04 F0` apply |
+| Other sections seen | `11` and `27` (key remap, 10 pages), `15` (opened with `04 19`, 8 pages) and `25` (1 page) during a profile apply, `17 05` (1 page) system settings; `F5` (read back the live table on the siblings) is refused |
 
-Pick the root hub that lists `USB-Keyboard` (vendor `0C45`), accept the
-default capture file, and leave it running. Open the Cloud Nine app and
-perform a fixed script, waiting five seconds between steps so the capture
-can be read against the clock:
+The lighting section (`13`) on the siblings is one 16-byte effect record.
+The C959 declares it with 18 pages, and the application rewrites all 1152
+bytes on every change, including a color change:
 
-1. Set the whole keyboard to static red.
-2. Static green.
-3. Static blue.
-4. Brightness to its lowest value, then back to full.
-5. Any built-in effect (for its opcode), then back to static.
-6. Close the app.
+| Offset | Content |
+|---|---|
+| 0 | 20 preset records of 16 bytes: one per effect 1 to 19, then the per-key mode (`80`) |
+| 320 | 192 zero bytes |
+| 512 | 144 per-key entries, each `80 R G B` |
+| 1088 | the active record: a copy of the preset the keyboard should run |
+| 1104 | zero bytes to the end of page 18 |
 
-Stop the capture with Ctrl+C and open the file in Wireshark with the
-filter `usb.transfer_type == 0x02 || usbhid` restricted to the keyboard's
-device address. The frames of interest are SET_REPORT control transfers
-or interrupt OUT writes on interface 1 whose payload changes with the
-color chosen; their report id, length, and the position of the red, green
-and blue bytes give the frame layout. A per-key write usually shows as a
-burst of frames with a running offset.
+A record is `MODE R G B 00 00 00 00 RAINBOW BRIGHTNESS SPEED DIRECTION 00
+00 AA 55`. The application's presets are white, cyan, red, yellow and blue
+for effects 1 to 5, `A0 20 F0` with the rainbow flag from effect 7 on,
+brightness and speed 6 everywhere, and brightness 5 on the per-key
+preset. Choosing an effect copies its preset into the active record;
+changing its color, brightness or speed edits both. Brightness went from 6
+(the application's "High") to 1 ("Dim") and speed between 5 and 9. Effect
+1 is the static color and effect 2 the breathing effect; the other ids
+follow the application's list.
 
-What the capture decides:
+A block with an all-zero active record turns the LEDs off, which is what
+every partial write and the application without a loaded profile produced:
+the application writes all zeros when its "Profile" header is empty, and
+the first captures were all zeros for that reason. The firmware stores the
+block in flash and keeps it across a replug, so the backend treats the
+keyboard as persistent, writes a block only when it differs from the last
+one written, and offers no direct mode: a session takes close to a second
+and would wear the flash at the pulse tick rate. The sleep pulse uses the
+breathing effect with a speed derived from the period (logarithmic between
+the period bounds; the keyboard's own timing is not measured yet).
 
-- If the app sends plain HID output or feature reports, a
-  `argb-backend-sonix` crate can replay them through `hidapi`, and the
-  keyboard follows the configuration like the others. Persistence across
-  a reboot is then tested the usual way.
-- If the app only writes a configuration blob that the firmware interprets
-  (common with these OEM apps), the backend can still write a static color
-  into that blob, but live effects would stay the firmware's.
-- If the traffic is a firmware-style upload, the keyboard is documented as
-  unsupported.
+### Capture notes
+
+- USBPcap on the root hub carrying the keyboard, all devices, 512-byte
+  snapshot. The two optical drives on the same hub flood the file with
+  bulk polling (the first capture reached 5.8 GB in six minutes); a 45
+  second window per experiment keeps it readable.
+- tshark fields are empty for the payload of control transfers; the
+  scratch parser read the `-x` hex dump against the USBPcap header
+  (function at bytes 14 and 15, info at 16, device address at 19 and 20,
+  endpoint at 21, transfer type at 22, data length at 23 to 26, setup
+  stage at 27, then the 8 setup bytes and the data).
+- The keyboard's USB address changed between captures (11, then 14); read
+  it from the `GET_DESCRIPTOR` responses (`usb.idVendor`) rather than
+  assuming it.
+- `argb-sonix-probe` replays sessions from the console (`light`, `fill`,
+  `off`, raw `session` and `raw`) for experiments the backend does not
+  cover.
+
+### Recovery
+
+Any write with an empty active record leaves the keyboard dark; it is not
+broken. Pressing the keyboard's own effect key restores a firmware effect,
+and `argb apply active` or `argb-sonix-probe light` restores the
+configured lighting. The vendor application needs a profile loaded (the
+"P" page) before its Lighting page does anything.
 
 ## Upstream report for the G203
 
@@ -125,6 +160,10 @@ and the same for `Breathing`, next to the `colors.resize(1)` calls.
 
 ## Status
 
-- G203: understood and worked around (this branch); upstream fix to file
-  with the OpenRGB project.
-- C959: identified; capture pending.
+- G203: understood and worked around; upstream fix to file with the
+  OpenRGB project.
+- C959: protocol captured and documented; `argb-backend-sonix` drives the
+  static color, brightness and the breathing effect from the service and
+  the CLI. To verify on the machine: what the keyboard shows while the
+  host sleeps (whether the port keeps it powered) and during POST, and the
+  breathing speed scale.
