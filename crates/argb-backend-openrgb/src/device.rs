@@ -130,6 +130,11 @@ pub fn hardware_speed(mode: &ModeDescription, period: PulsePeriod) -> u32 {
     u32::try_from(speed as i64).unwrap_or(mode.speed_max)
 }
 
+/// Most colors a mode update carries. The wire format counts mode colors in
+/// a `u16`, and a description's `colors_min`/`colors_max` are `u32` values
+/// from the server, so the count is bounded here rather than trusted.
+pub const MAX_MODE_COLORS: u32 = u16::MAX as u32;
+
 /// Returns a copy of `mode` configured to show `color`, plus whether the
 /// controller's per-LED array must be written as well.
 #[must_use]
@@ -139,8 +144,12 @@ pub fn colorize(mode: &ModeDescription, color: Rgb) -> (ModeDescription, bool) {
         mode.color_mode = ColorMode::ModeSpecific as u32;
         // The server rejects a mode whose color count is outside the declared
         // range, so stay inside it even when that leaves no slot for the color.
-        let count = usize::try_from(mode.colors_min.max(1).min(mode.colors_max)).unwrap_or(0);
-        mode.colors = vec![color; count];
+        let count = mode
+            .colors_min
+            .max(1)
+            .min(mode.colors_max)
+            .min(MAX_MODE_COLORS);
+        mode.colors = vec![color; usize::try_from(count).unwrap_or(0)];
         (mode, false)
     } else if mode.has_flag(mode_flags::HAS_PER_LED_COLOR) {
         mode.color_mode = ColorMode::PerLed as u32;
@@ -171,7 +180,7 @@ impl<C: ControllerCommands> OpenRgbDevice<C> {
     ) -> Self {
         let modes = ModeMap::analyze(&description);
         let capabilities = modes.capabilities(&description);
-        debug!(%alias, index, name = %description.name, ?modes, ?capabilities, "mapped controller");
+        debug!(%alias, index, name = ?description.name, ?modes, ?capabilities, "mapped controller");
         Self {
             alias,
             index,
@@ -492,6 +501,18 @@ mod tests {
         let map = ModeMap::analyze(&controller);
         assert_eq!(map.pulse, None);
         assert!(!map.capabilities(&controller).hardware_pulse);
+    }
+
+    #[test]
+    fn the_mode_color_count_is_bounded_whatever_the_server_declares() {
+        let mode = ModeDescription {
+            flags: mode_flags::HAS_MODE_SPECIFIC_COLOR,
+            colors_min: u32::MAX,
+            colors_max: u32::MAX,
+            ..ModeDescription::default()
+        };
+        let (colored, _) = colorize(&mode, Rgb::WHITE);
+        assert_eq!(colored.colors.len(), MAX_MODE_COLORS as usize);
     }
 
     #[test]

@@ -54,13 +54,12 @@ impl FrameCipher {
         block_op: impl Fn(&mut GenericArray<u8, aes::cipher::typenum::U16>),
     ) -> Vec<u8> {
         let mut out = Vec::with_capacity(data.len());
-        let mut chunks = data.chunks_exact(BLOCK_LEN);
-        for chunk in &mut chunks {
+        let (chunks, remainder) = data.as_chunks::<BLOCK_LEN>();
+        for chunk in chunks {
             let mut block = GenericArray::clone_from_slice(chunk);
             block_op(&mut block);
             out.extend_from_slice(&block);
         }
-        let remainder = chunks.remainder();
         if !remainder.is_empty() {
             out.extend(self.rc4(remainder));
         }

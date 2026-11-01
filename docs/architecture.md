@@ -348,38 +348,81 @@ configured device matches; other Govee lights are listed as unsupported.
 with their model, support and channel. `--no-bluetooth` skips the scan, and
 a machine without a Bluetooth adapter gets a note rather than a failure.
 
-## Security considerations
+## Security
 
-These are the inputs to the Phase 2.5 review.
+Reviewed in Phase 2.5 (2026-11-01) over every crate and the installed setup
+on the reference machine. The review asked three questions: what can an
+unprivileged local process do to the service, what can a device in radio or
+USB range do, and what does the service give up if it is compromised.
 
-- The OpenRGB SDK has no authentication. The service connects only to the
-  loopback address; the configuration schema defaults to it and the
-  documentation says why.
-- The service runs as `NT AUTHORITY\LocalService`: it needs only the
-  loopback network and read access to the configuration, and power events
-  reach every service regardless of account. It must not execute anything
-  from the configuration file: the file holds data only, and
-  `deny_unknown_fields` rejects anything unexpected.
+### Trust boundaries
+
+| Boundary | Who is on the other side | Reaches the service through |
+|---|---|---|
+| Configuration file | Administrators only (directory ACL, inheritance cut) | TOML parsed with `deny_unknown_fields`, validated, data only |
+| OpenRGB SDK socket, `127.0.0.1:6742` | The OpenRGB service (LocalSystem), or any local process when OpenRGB is not listening, since the SDK has no authentication | Packet headers and controller descriptions parsed by `argb-backend-openrgb` |
+| Bluetooth LE | Any device in range: the lights pair with nothing, and anything can advertise a light's name | Advertisements and notifications parsed by `argb-backend-govee` |
+| USB HID | Whatever enumerates as a supported keyboard | 65-byte feature reports read by `argb-backend-sonix` |
+| Dependencies | crates.io | `Cargo.lock`, checked with `cargo audit` |
+
+### Findings and fixes
+
+| # | Finding | Severity | Fix |
+|---|---|---|---|
+| 1 | The SDK client allocated a packet's payload from the `u32` length in its header before reading it. A process squatting the SDK port while OpenRGB is down could make the service commit up to 4 GiB per packet and crash it; after three crashes in a day the Service Control Manager stops restarting it. | Medium (local denial of service) | `Header::decode` refuses a payload above `MAX_PAYLOAD_LEN` (16 MiB, far above any controller description); both receive paths go through it. |
+| 2 | A mode update took its color count from the server's `colors_min`/`colors_max` (`u32`) and built a vector of that size; a hostile server could make it allocate gigabytes or panic in the `u16` length encoder. | Medium (local denial of service) | `colorize` bounds the count by `MAX_MODE_COLORS` (the `u16` the wire format carries). |
+| 3 | `time` 0.3.45 in `Cargo.lock` has a published denial-of-service advisory (RUSTSEC-2026-0009, stack exhaustion when parsing). The project never parses dates with it, but the fix is a version bump. | Low | `time` 0.3.47; the workspace's minimum Rust is 1.88 as that version requires. `cargo audit` is part of the checks in `docs/contributing.md`. |
+| 4 | The service process carried every privilege of the `LocalService` account, impersonation included, which a compromise could use to climb to SYSTEM. It needs none of them. | Low (defense in depth) | `argb service install` sets the required-privileges list to `SeChangeNotifyPrivilege` only, through `sc.exe privs`; the Service Control Manager strips the rest from the process token. |
+| 5 | The installer ran `icacls` by name, resolved through the search path, from an elevated process. | Low | System tools run by absolute path under the Windows system folder (`system_tool`). |
+| 6 | Names reported by the OpenRGB server and advertised over Bluetooth were logged with `Display` and printed to the terminal unescaped, so a hostile peer could inject log lines or terminal escape sequences. | Low | Peer names are logged with `Debug` (escaped) and the CLI replaces control characters before printing. |
+| 7 | A non-loopback `openrgb.host` would drive lighting across the network in the clear, with no warning. | Informational | `argb service check` warns when the host is not a loopback address. |
+
+After the fixes `cargo audit` reports no advisory, and the parsing of every
+peer-supplied length is bounded: strings and element counts in controller
+descriptions are `u16` on the wire, the matrix map is read from a `u16`-sized
+slice, Govee notifications are handled frame by frame and discarded when
+nobody waits for them, and the keyboard echo is a fixed 65-byte report.
+
+### Accepted risks
+
+- **The SDK has no authentication.** Any local process can drive the lighting
+  through OpenRGB directly, or impersonate the server to this service while
+  OpenRGB is down, which at most leaves the lighting unmanaged until OpenRGB
+  is back. OpenRGB runs as LocalSystem by its own installer; its exposure to
+  local clients is its own, and nothing in this project widens it.
+- **The lights accept anyone in range.** Govee's "encrypted" channel runs
+  under a published pre-shared key, so it hides nothing and authenticates
+  nobody. A neighbour can set the lights, or advertise a light's name so
+  the service talks to them instead; the service then writes colors to the
+  wrong peer and logs a failure, nothing more.
+- **Log files are readable by local users.** They hold device names, aliases
+  and timings, no secrets; the service account can write only there.
+- **`argb apply` and `argb devices` run as the invoking user** and talk to
+  the devices directly, which is no more than any user can already do
+  through OpenRGB or Bluetooth.
+
+### What the setup relies on
+
+- The service runs as `NT AUTHORITY\LocalService` with one privilege, from
+  a binary under the program files folder registered with a quoted path.
 - The configuration directory under the machine-wide program data folder is
   writable by administrators and SYSTEM only, readable by the service
-  account and local users, with inheritance cut. `argb service install`
-  sets this ACL with `icacls` using well-known SIDs, so an unprivileged
-  process cannot make the service change lighting or crash on malformed
-  input, and `argb config ...` writes need an elevated prompt.
-- The binaries are copied to the program files folder, which is already
-  protected, so the registered service path cannot be swapped by a user.
-- The Govee lights pair with nothing: the encrypted channel's key is the
-  vendor's fixed pre-shared key, already public in the open-source clients
-  this backend follows, and the session key lives only in memory. The
-  configuration holds advertised names only, never addresses.
+  account and local users; `argb service install` sets the ACL with
+  `icacls` by well-known SIDs, so `argb config ...` writes need an elevated
+  prompt and the service never executes anything from the file.
+- Writes replace the file atomically under an advisory lock, so the service
+  never reads a half-written document.
+- The Govee session key lives in memory only; the configuration holds
+  advertised names, never addresses.
 - The keyboard backend opens the keyboard's own HID collection, which
-  Windows lets any process do for feature reports; it only ever writes the
-  lighting block and reads the keyboard's echo of its commands, never key
-  input (the input reports go to the system's keyboard driver, which
-  `hidapi` cannot read). Every write replaces the whole block with values
-  the backend builds, so nothing from the configuration reaches the
-  keyboard but a color, a brightness level and a speed.
-- No `unsafe` code in project crates; the lint forbids it at the workspace level.
+  Windows lets any process do for feature reports; it writes the lighting
+  block and reads the keyboard's echo of its commands, never key input (the
+  input reports go to the system's keyboard driver, which `hidapi` cannot
+  read). Every write replaces the whole block with values the backend
+  builds, so nothing from the configuration reaches the keyboard but a
+  color, a brightness level and a speed.
+- No `unsafe` code in project crates; the lint forbids it at the workspace
+  level.
 
 ## Repository layout
 
@@ -414,5 +457,5 @@ docs/
 6. **Installer** (done): `argb service install|uninstall|start|stop|status|check`, directory ACL, OpenRGB reachability check.
 7. **Phase 2** (done): Govee BLE backend. A spike settled the protocol, the encrypted channel and Bluetooth from session 0 (`docs/phase2-govee-ble.md`); the `argb-backend-govee` crate drives the Glide Hexa and the Lyra lamp from the service and the CLI, `argb devices scan` adds them, and failed lights are retried without dropping OpenRGB.
 8. **Phase 2.1** (in progress): the G203's static color is an OpenRGB driver defect (`colors_max` left at zero) that the SDK cannot work around; the adapter now also refuses a breathing mode that cannot carry a color, and the fix is reported upstream. The Cloud Nine C959 is a Sonix keyboard (`0C45:8008`) whose vendor application writes an 18-page lighting block over HID feature reports; a USB capture settled the layout and `argb-backend-sonix` drives the static color, brightness and breathing effect from the service and the CLI (`docs/phase2-1-peripherals.md`). Left to verify on the machine: the keyboard during sleep and POST, and the breathing speed scale.
-9. **Phase 2.5**: security review and fixes.
+9. **Phase 2.5** (done): security review of every crate and of the installed setup; seven findings, all fixed (bounded SDK payload and mode-color sizes, the `time` advisory, a one-privilege service process, system tools by absolute path, escaped peer names, a loopback check), see "Security".
 10. **Phase 3**: Samsung monitor investigation.

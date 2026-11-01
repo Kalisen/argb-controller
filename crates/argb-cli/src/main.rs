@@ -14,7 +14,8 @@ use argb_backend_govee::{
 };
 use argb_backend_openrgb::protocol::{ColorMode, mode_flags};
 use argb_backend_openrgb::{
-    ControllerDescription, ModeMap, OpenRgbClient, assign_aliases, new_devices, open_devices,
+    ControllerDescription, ModeMap, NewDevice, OpenRgbClient, assign_aliases, new_devices,
+    open_devices,
 };
 use argb_backend_sonix::{
     SeenKeyboard, configured_devices as configured_keyboards, list_keyboards,
@@ -43,6 +44,23 @@ struct Cli {
 
 /// Name this tool registers with the OpenRGB server.
 const CLIENT_NAME: &str = "argb-cli";
+/// Stands in for a control character in a name a device reported.
+const UNPRINTABLE_PLACEHOLDER: char = '?';
+
+/// A device-reported name made safe for the terminal: control characters
+/// (which could carry escape sequences from a Bluetooth advertisement or an
+/// SDK server) become [`UNPRINTABLE_PLACEHOLDER`].
+fn printable(name: &str) -> String {
+    name.chars()
+        .map(|c| {
+            if c.is_control() {
+                UNPRINTABLE_PLACEHOLDER
+            } else {
+                c
+            }
+        })
+        .collect()
+}
 /// How long `devices list` and `devices scan` listen for Govee lights.
 const BLE_SCAN_DURATION: Duration = Duration::from_secs(8);
 
@@ -499,6 +517,34 @@ fn plugged_keyboards(config: &ConfigFile) -> Vec<SeenKeyboard> {
 /// Longest wait for OpenRGB to finish a requested hardware detection.
 const RESCAN_TIMEOUT: Duration = Duration::from_secs(60);
 
+/// Lists the devices a scan would add, one row each.
+fn print_new_devices(found: &[NewDevice], keyboards: &[&SeenKeyboard], lights: &[&SeenLight]) {
+    for device in found {
+        println!(
+            "{:>5}  {:<34}{}",
+            device.index,
+            device.alias,
+            printable(&device.match_name)
+        );
+    }
+    for keyboard in keyboards {
+        println!(
+            "{:>5}  {:<34}{}",
+            "usb",
+            keyboard.alias,
+            printable(&keyboard.name)
+        );
+    }
+    for light in lights {
+        println!(
+            "{:>5}  {:<34}{}",
+            "ble",
+            light.alias,
+            printable(&light.name)
+        );
+    }
+}
+
 fn scan_devices(
     store: &ConfigStore,
     config: &ConfigFile,
@@ -535,7 +581,7 @@ fn scan_devices(
     for light in lights.iter().filter(|l| !l.configured && !l.supported) {
         println!(
             "  skipping {} (model {} is not supported)",
-            light.name,
+            printable(&light.name),
             light.model_code.as_deref().unwrap_or("unknown")
         );
     }
@@ -545,18 +591,7 @@ fn scan_devices(
         );
         return Ok(());
     }
-    for device in &found {
-        println!(
-            "{:>5}  {:<34}{}",
-            device.index, device.alias, device.match_name
-        );
-    }
-    for keyboard in &new_keyboards {
-        println!("{:>5}  {:<34}{}", "usb", keyboard.alias, keyboard.name);
-    }
-    for light in &new_lights {
-        println!("{:>5}  {:<34}{}", "ble", light.alias, light.name);
-    }
+    print_new_devices(&found, &new_keyboards, &new_lights);
     let total = found.len() + new_keyboards.len() + new_lights.len();
     if dry_run {
         println!("{total} new device(s); nothing written (--dry-run)");
@@ -626,15 +661,18 @@ fn show_device(config: &ConfigFile, index: u32) -> anyhow::Result<()> {
 fn print_controller(index: u32, controller: &ControllerDescription) {
     let modes = ModeMap::analyze(controller);
     let caps = modes.capabilities(controller);
-    println!("controller {index}: {}", controller.name);
+    println!("controller {index}: {}", printable(&controller.name));
     println!(
         "  type: {}  vendor: {}  version: {}",
-        controller.device_type, controller.vendor, controller.version
+        controller.device_type,
+        printable(&controller.vendor),
+        printable(&controller.version)
     );
-    println!("  description: {}", controller.description);
+    println!("  description: {}", printable(&controller.description));
     println!(
         "  location: {}  serial: {}",
-        controller.location, controller.serial
+        printable(&controller.location),
+        printable(&controller.serial)
     );
     println!(
         "  leds: {}  active mode: {}",
@@ -652,7 +690,7 @@ fn print_controller(index: u32, controller: &ControllerDescription) {
             .map_or_else(|| mode.color_mode.to_string(), |m| format!("{m:?}"));
         println!(
             "    [{i}] {:<16} value={} flags=[{}] speed={}..{} (now {}) brightness={}..{} (now {}) colors={}..{} color_mode={color_mode}",
-            mode.name,
+            printable(&mode.name),
             mode.value,
             mode_flags::describe(mode.flags),
             mode.speed_min,
@@ -669,7 +707,7 @@ fn print_controller(index: u32, controller: &ControllerDescription) {
     for (i, zone) in controller.zones.iter().enumerate() {
         println!(
             "    [{i}] {:<16} type={} leds={} ({}..{}) segments={}",
-            zone.name,
+            printable(&zone.name),
             zone.zone_type,
             zone.leds_count,
             zone.leds_min,
@@ -709,7 +747,11 @@ fn list_devices(config: &ConfigFile, bluetooth: bool) -> anyhow::Result<()> {
         );
         println!(
             "{:>5}  {:<34}{:<13}{:<9}{}",
-            assignment.index, alias, controller.device_type, flags, controller.name
+            assignment.index,
+            alias,
+            controller.device_type,
+            flags,
+            printable(&controller.name)
         );
     }
     println!();
@@ -728,7 +770,7 @@ fn list_devices(config: &ConfigFile, bluetooth: bool) -> anyhow::Result<()> {
                 keyboard.alias,
                 if keyboard.configured { " *" } else { "" }
             );
-            println!("{:<34}{:<9}{}", alias, "-BPS", keyboard.name);
+            println!("{:<34}{:<9}{}", alias, "-BPS", printable(&keyboard.name));
         }
     }
     if !bluetooth {
@@ -764,7 +806,7 @@ fn list_devices(config: &ConfigFile, bluetooth: bool) -> anyhow::Result<()> {
             } else {
                 "plain"
             },
-            light.name
+            printable(&light.name)
         );
     }
     Ok(())
