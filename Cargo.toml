@@ -8,6 +8,8 @@ members = [
     "crates/argb-service",
     "crates/argb-cli",
     "crates/argb-backend-govee",
+    "crates/argb-backend-sonix",
+    "crates/argb-sonix-probe",
 ]
 
 [workspace.package]
@@ -23,6 +25,7 @@ argb-config = { path = "crates/argb-config" }
 argb-engine = { path = "crates/argb-engine" }
 argb-backend-openrgb = { path = "crates/argb-backend-openrgb" }
 argb-backend-govee = { path = "crates/argb-backend-govee" }
+argb-backend-sonix = { path = "crates/argb-backend-sonix" }
 argb-service = { path = "crates/argb-service" }
 
 anyhow = "1"
@@ -41,6 +44,7 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
 futures = "0.3"
 uuid = "1"
 aes = "0.8"
+hidapi = "2"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

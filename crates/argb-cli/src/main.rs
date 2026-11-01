@@ -9,11 +9,15 @@ use std::time::Duration;
 
 use anyhow::{Context, bail};
 use argb_backend_govee::{
-    SeenLight, SharedRuntime as BleRuntimeSlot, configured_devices, scan_lights,
+    SeenLight, SharedRuntime as BleRuntimeSlot, configured_devices as configured_lights,
+    scan_lights,
 };
 use argb_backend_openrgb::protocol::{ColorMode, mode_flags};
 use argb_backend_openrgb::{
     ControllerDescription, ModeMap, OpenRgbClient, assign_aliases, new_devices, open_devices,
+};
+use argb_backend_sonix::{
+    SeenKeyboard, configured_devices as configured_keyboards, list_keyboards,
 };
 use argb_config::{ConfigError, ConfigFile, ConfigStore, DeviceSchema, OpenRgbSettings, paths};
 use argb_domain::{Backend, Brightness, DeviceAlias, LightingMode, PowerState, PulsePeriod, Rgb};
@@ -120,7 +124,8 @@ const PROBE_PALETTE: [(&str, Rgb); 8] = [
 #[derive(Subcommand)]
 enum DevicesCommand {
     /// List the controllers OpenRGB reports and the alias each one maps to,
-    /// then the Govee lights heard over Bluetooth LE.
+    /// the supported keyboards plugged in, then the Govee lights heard over
+    /// Bluetooth LE.
     List {
         /// Skip the Bluetooth LE scan.
         #[arg(long)]
@@ -132,10 +137,11 @@ enum DevicesCommand {
         /// Controller index as printed by `devices list`.
         index: u32,
     },
-    /// Add a configuration entry for every controller OpenRGB reports and
-    /// every supported Govee light heard over Bluetooth LE that no configured
-    /// device matches. New entries have no overrides, so they follow the
-    /// state defaults; the running service picks the file up.
+    /// Add a configuration entry for every controller OpenRGB reports, every
+    /// supported keyboard plugged in and every supported Govee light heard
+    /// over Bluetooth LE that no configured device matches. New entries have
+    /// no overrides, so they follow the state defaults; the running service
+    /// picks the file up.
     Scan {
         /// Ask OpenRGB to detect hardware again before scanning.
         #[arg(long)]
@@ -233,6 +239,7 @@ impl From<StateArg> for PowerState {
 enum BackendArg {
     Openrgb,
     GoveeBle,
+    Sonix,
 }
 
 impl From<BackendArg> for Backend {
@@ -240,6 +247,7 @@ impl From<BackendArg> for Backend {
         match value {
             BackendArg::Openrgb => Backend::OpenRgb,
             BackendArg::GoveeBle => Backend::GoveeBle,
+            BackendArg::Sonix => Backend::Sonix,
         }
     }
 }
@@ -359,7 +367,7 @@ fn load_or_starter(store: &ConfigStore) -> anyhow::Result<ConfigFile> {
 }
 
 /// Every device the configuration drives: the OpenRGB controllers, then the
-/// configured Govee lights (contacted on their first apply).
+/// configured Govee lights and keyboards (contacted on their first apply).
 fn all_devices(config: &ConfigFile) -> anyhow::Result<Vec<Box<dyn LightingDevice>>> {
     let profile = config.to_profile();
     let controllers = open_devices(
@@ -378,7 +386,10 @@ fn all_devices(config: &ConfigFile) -> anyhow::Result<Vec<Box<dyn LightingDevice
         .into_iter()
         .map(|device| Box::new(device) as Box<dyn LightingDevice>)
         .collect();
-    for device in configured_devices(&profile, &BleRuntimeSlot::default()) {
+    for device in configured_lights(&profile, &BleRuntimeSlot::default()) {
+        devices.push(Box::new(device));
+    }
+    for device in configured_keyboards(&profile) {
         devices.push(Box::new(device));
     }
     Ok(devices)
@@ -474,6 +485,17 @@ fn heard_lights(config: &ConfigFile) -> Vec<SeenLight> {
     }
 }
 
+/// The supported keyboards plugged in, or none with the reason printed.
+fn plugged_keyboards(config: &ConfigFile) -> Vec<SeenKeyboard> {
+    match list_keyboards(&config.to_profile()) {
+        Ok(keyboards) => keyboards,
+        Err(error) => {
+            println!("USB keyboard enumeration skipped: {error}");
+            Vec::new()
+        }
+    }
+}
+
 /// Longest wait for OpenRGB to finish a requested hardware detection.
 const RESCAN_TIMEOUT: Duration = Duration::from_secs(60);
 
@@ -496,6 +518,11 @@ fn scan_devices(
     let controllers = client.controllers()?;
     let found = new_devices(&config.to_profile(), &controllers);
     drop(client);
+    let keyboards = plugged_keyboards(config);
+    let new_keyboards: Vec<&SeenKeyboard> = keyboards
+        .iter()
+        .filter(|keyboard| !keyboard.configured)
+        .collect();
     let lights = if bluetooth {
         heard_lights(config)
     } else {
@@ -512,9 +539,9 @@ fn scan_devices(
             light.model_code.as_deref().unwrap_or("unknown")
         );
     }
-    if found.is_empty() && new_lights.is_empty() {
+    if found.is_empty() && new_keyboards.is_empty() && new_lights.is_empty() {
         println!(
-            "every controller OpenRGB reports and every supported Govee light is already configured"
+            "every controller OpenRGB reports, every supported keyboard and every supported Govee light is already configured"
         );
         return Ok(());
     }
@@ -524,10 +551,13 @@ fn scan_devices(
             device.index, device.alias, device.match_name
         );
     }
+    for keyboard in &new_keyboards {
+        println!("{:>5}  {:<34}{}", "usb", keyboard.alias, keyboard.name);
+    }
     for light in &new_lights {
         println!("{:>5}  {:<34}{}", "ble", light.alias, light.name);
     }
-    let total = found.len() + new_lights.len();
+    let total = found.len() + new_keyboards.len() + new_lights.len();
     if dry_run {
         println!("{total} new device(s); nothing written (--dry-run)");
         return Ok(());
@@ -545,6 +575,16 @@ fn scan_devices(
                     states: BTreeMap::new(),
                 },
             );
+        }
+        for keyboard in &new_keyboards {
+            config
+                .devices
+                .entry(keyboard.alias.clone())
+                .or_insert(DeviceSchema {
+                    backend: Backend::Sonix,
+                    match_name: keyboard.name.clone(),
+                    states: BTreeMap::new(),
+                });
         }
         for light in &new_lights {
             config
@@ -641,7 +681,8 @@ fn print_controller(index: u32, controller: &ControllerDescription) {
 
 /// Prints one line per controller: index, alias (marked `*` when it comes
 /// from the configuration), device type, capabilities and reported name;
-/// then one line per Govee light heard, when `bluetooth` is set.
+/// then one line per supported keyboard plugged in; then one line per Govee
+/// light heard, when `bluetooth` is set.
 fn list_devices(config: &ConfigFile, bluetooth: bool) -> anyhow::Result<()> {
     let mut client = connect(config)?;
     let controllers = client.controllers()?;
@@ -675,6 +716,21 @@ fn list_devices(config: &ConfigFile, bluetooth: bool) -> anyhow::Result<()> {
     println!("caps: D direct, B hardware brightness, P hardware pulse, S persistent memory");
     println!("*: alias taken from the configuration; others are derived from the name");
     drop(client);
+    println!();
+    let keyboards = plugged_keyboards(config);
+    if keyboards.is_empty() {
+        println!("no supported USB keyboard plugged in");
+    } else {
+        println!("{:<34}{:<9}name", "alias", "caps");
+        for keyboard in &keyboards {
+            let alias = format!(
+                "{}{}",
+                keyboard.alias,
+                if keyboard.configured { " *" } else { "" }
+            );
+            println!("{:<34}{:<9}{}", alias, "-BPS", keyboard.name);
+        }
+    }
     if !bluetooth {
         return Ok(());
     }

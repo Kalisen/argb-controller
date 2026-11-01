@@ -1,13 +1,16 @@
-//! The service body: keeps an engine connected to OpenRGB and the Govee
-//! lights, follows the configuration file, and applies the requested power
-//! state.
+//! The service body: keeps an engine connected to OpenRGB, the Govee
+//! lights and the Sonix keyboards, follows the configuration file, and
+//! applies the requested power state.
 
 use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::Context;
-use argb_backend_govee::{SharedRuntime as BleRuntimeSlot, configured_devices};
+use argb_backend_govee::{
+    SharedRuntime as BleRuntimeSlot, configured_devices as configured_lights,
+};
 use argb_backend_openrgb::client::RESCAN_QUIET_PERIOD;
 use argb_backend_openrgb::{OpenRgbClient, SharedClient, open_session};
+use argb_backend_sonix::configured_devices as configured_keyboards;
 use argb_config::{ConfigFile, ConfigStore};
 use argb_domain::{Backend, DeviceAlias, LightingProfile, PowerState};
 use argb_engine::{Attendance, DEFAULT_TICK_RATE_HZ, DeviceError, Engine, LightingDevice, Persist};
@@ -37,12 +40,13 @@ pub const RESUME_RESCAN_TIMEOUT: Duration = Duration::from_secs(30);
 /// detecting, so rebuilding on the first announcement would catch the list
 /// half full; the same quiet period closes a rescan.
 pub const DEVICE_LIST_SETTLE: Duration = RESCAN_QUIET_PERIOD;
-/// Delay before a Govee light that failed its last apply (off, out of
-/// range, Bluetooth busy) is tried again. OpenRGB failures reconnect
-/// instead, since they mean the whole server connection is gone.
-pub const GOVEE_RETRY_INTERVAL: Duration = Duration::from_secs(10);
+/// Delay before a Govee light or a keyboard that failed its last apply
+/// (off, out of range, Bluetooth busy, unplugged) is tried again. OpenRGB
+/// failures reconnect instead, since they mean the whole server connection
+/// is gone.
+pub const PERIPHERAL_RETRY_INTERVAL: Duration = Duration::from_secs(10);
 
-/// The engine drives OpenRGB controllers and Govee lights alike.
+/// The engine drives OpenRGB controllers, Govee lights and keyboards alike.
 type ServiceEngine = Engine<Box<dyn LightingDevice>>;
 
 /// Runtime state of the service between commands.
@@ -345,8 +349,8 @@ impl Runtime {
     }
 
     /// Opens the OpenRGB session and builds the engine on its controllers
-    /// plus the configured Govee lights. The lights are not contacted here:
-    /// each one connects on its first apply.
+    /// plus the configured Govee lights and keyboards. Those are not
+    /// contacted here: each one connects on its first apply.
     fn build_engine(&self) -> anyhow::Result<(ServiceEngine, SharedClient<OpenRgbClient>)> {
         let settings = &self.config.openrgb;
         let profile = self.config.to_profile();
@@ -369,8 +373,12 @@ impl Runtime {
             .into_iter()
             .map(|device| Box::new(device) as Box<dyn LightingDevice>)
             .collect();
-        for device in configured_devices(&profile, &self.ble) {
+        for device in configured_lights(&profile, &self.ble) {
             info!(alias = %device.alias(), "Govee light configured");
+            devices.push(Box::new(device));
+        }
+        for device in configured_keyboards(&profile) {
+            info!(alias = %device.alias(), "Sonix keyboard configured");
             devices.push(Box::new(device));
         }
         Ok((Engine::new(profile, devices), session.client))
@@ -386,17 +394,17 @@ impl Runtime {
         self.handle_errors(&errors);
     }
 
-    /// Sorts backend failures by origin: a Govee light that failed is
-    /// retried after [`GOVEE_RETRY_INTERVAL`], an OpenRGB failure drops the
-    /// connection so that the next poll reconnects. Capability errors are
-    /// already logged by the engine.
+    /// Sorts backend failures by origin: a Govee light or a keyboard that
+    /// failed is retried after [`PERIPHERAL_RETRY_INTERVAL`], an OpenRGB
+    /// failure drops the connection so that the next poll reconnects.
+    /// Capability errors are already logged by the engine.
     fn handle_errors(&mut self, errors: &[DeviceError]) {
         let mut openrgb_failed = false;
-        let mut govee_failed = false;
+        let mut peripheral_failed = false;
         for error in errors {
             if let DeviceError::Backend { alias, .. } = error {
                 match backend_of(&self.config, alias) {
-                    Backend::GoveeBle => govee_failed = true,
+                    Backend::GoveeBle | Backend::Sonix => peripheral_failed = true,
                     Backend::OpenRgb => openrgb_failed = true,
                 }
             }
@@ -404,9 +412,9 @@ impl Runtime {
         if openrgb_failed {
             error!("OpenRGB connection lost; reconnecting");
             self.disconnect();
-        } else if govee_failed {
-            warn!(retry_in = ?GOVEE_RETRY_INTERVAL, "a Govee light did not take the update");
-            self.retry_due = Some(Instant::now() + GOVEE_RETRY_INTERVAL);
+        } else if peripheral_failed {
+            warn!(retry_in = ?PERIPHERAL_RETRY_INTERVAL, "a light or keyboard did not take the update");
+            self.retry_due = Some(Instant::now() + PERIPHERAL_RETRY_INTERVAL);
         }
     }
 }

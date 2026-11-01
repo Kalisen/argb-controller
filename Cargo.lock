@@ -104,12 +104,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "argb-backend-sonix"
+version = "0.1.0"
+dependencies = [
+ "argb-domain",
+ "argb-engine",
+ "hidapi",
+ "thiserror",
+ "tracing",
+]
+
+[[package]]
 name = "argb-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "argb-backend-govee",
  "argb-backend-openrgb",
+ "argb-backend-sonix",
  "argb-config",
  "argb-domain",
  "argb-engine",
@@ -154,6 +166,7 @@ dependencies = [
  "anyhow",
  "argb-backend-govee",
  "argb-backend-openrgb",
+ "argb-backend-sonix",
  "argb-config",
  "argb-domain",
  "argb-engine",
@@ -162,6 +175,17 @@ dependencies = [
  "tracing-appender",
  "tracing-subscriber",
  "windows-service",
+]
+
+[[package]]
+name = "argb-sonix-probe"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "argb-backend-sonix",
+ "argb-domain",
+ "clap",
+ "hidapi",
 ]
 
 [[package]]
@@ -257,6 +281,16 @@ name = "bytes"
 version = "1.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
+
+[[package]]
+name = "cc"
+version = "1.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "86e055fa6e3e40ad6187ba25b6855eeb635d5271f8e0f0e1e9a5826b8d75bea0"
+dependencies = [
+ "find-msvc-tools",
+ "shlex",
+]
 
 [[package]]
 name = "cfg-if"
@@ -451,6 +485,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "find-msvc-tools"
+version = "0.1.15"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1c66915cc5391097de7a2b0b972e8505aa33c0df401fd3a6811dbdb32881ba48"
+
+[[package]]
 name = "futures"
 version = "0.3.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -576,6 +616,19 @@ name = "heck"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
+
+[[package]]
+name = "hidapi"
+version = "2.6.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "818c0e1d27887aaf76fe737042e27a66b796a7b099e6d2e1a72d106c2dff3fa6"
+dependencies = [
+ "cc",
+ "cfg-if",
+ "libc",
+ "pkg-config",
+ "windows-sys 0.61.2",
+]
 
 [[package]]
 name = "indexmap"
@@ -998,6 +1051,12 @@ checksum = "f40ca3c46823713e0d4209592e8d6e826aa57e928f09752619fc696c499637f6"
 dependencies = [
  "lazy_static",
 ]
+
+[[package]]
+name = "shlex"
+version = "2.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
 
 [[package]]
 name = "simd_cesu8"

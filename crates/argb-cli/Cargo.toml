@@ -16,6 +16,7 @@ argb-domain = { workspace = true }
 argb-config = { workspace = true }
 argb-backend-openrgb = { workspace = true }
 argb-backend-govee = { workspace = true }
+argb-backend-sonix = { workspace = true }
 argb-engine = { workspace = true }
 argb-service = { workspace = true }
 anyhow = { workspace = true }

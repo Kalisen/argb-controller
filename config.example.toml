@@ -58,3 +58,10 @@ match_name = "Govee_H6061"
 [devices.floor-lamp]
 backend = "govee_ble"
 match_name = "Govee_H6076"
+
+# Sonix OEM keyboards (Cloud Nine C959) are driven over USB HID. `match_name`
+# is matched against "<model name> (<vendor id>:<product id>)", so either the
+# name or the USB id works. `argb devices scan` adds these entries for you.
+[devices.keyboard]
+backend = "sonix"
+match_name = "C959"

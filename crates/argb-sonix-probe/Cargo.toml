@@ -1,0 +1,19 @@
+[package]
+name = "argb-sonix-probe"
+description = "Phase 2.1 spike: drive a Sonix OEM keyboard (Cloud Nine C959) over HID feature reports from the console"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+argb-domain = { workspace = true }
+argb-backend-sonix = { workspace = true }
+anyhow = { workspace = true }
+clap = { workspace = true }
+hidapi = { workspace = true }
+
+[lints]
+workspace = true

@@ -15,3 +15,7 @@ Cargo.lock.orig
 # Local runtime artifacts
 *.log
 /config.local.toml
+
+# USB captures taken while reverse-engineering peripherals (large, machine specific)
+*.pcap
+*.pcapng
