@@ -106,8 +106,10 @@ brightness and speed 6 everywhere, and brightness 5 on the per-key
 preset. Choosing an effect copies its preset into the active record;
 changing its color, brightness or speed edits both. Brightness went from 6
 (the application's "High") to 1 ("Dim") and speed between 5 and 9. Effect
-1 is the static color and effect 2 the breathing effect; the other ids
-follow the application's list.
+ids follow the application's visible effect list, not its string table
+(whose entries 200 to 219 are in another order): 1 is "Static color", 2
+a rainbow effect, 3 "Falling" and 5 "Breath", checked on the keyboard;
+the application's list gives the rest.
 
 A block with an all-zero active record turns the LEDs off, which is what
 every partial write and the application without a loaded profile produced:

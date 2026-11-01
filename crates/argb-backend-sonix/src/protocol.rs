@@ -69,15 +69,18 @@ pub fn acknowledged(echo: &Report) -> bool {
 }
 
 /// Effects, by the mode byte of their record. The ids follow the order of
-/// the vendor application's effect list.
+/// the vendor application's visible effect list (not its string table):
+/// the ones checked on the keyboard are named here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum Effect {
-    /// One color on every key.
+    /// "Static color": one color on every key.
     Static = 0x01,
-    /// One color breathing.
-    Breathing = 0x02,
-    /// The per-key table of the lighting block.
+    /// "Falling": the color raining down the keyboard.
+    Falling = 0x03,
+    /// "Breath": one color breathing.
+    Breathing = 0x05,
+    /// "User defined": the per-key table of the lighting block.
     PerKey = 0x80,
 }
 
@@ -522,10 +525,10 @@ mod tests {
         assert_eq!(
             record(&block, LightingBlock::ACTIVE_OFFSET),
             [
-                0x02, 0x40, 0xE0, 0xD0, 0, 0, 0, 0, 0, 6, 9, 0, 0, 0, 0xAA, 0x55
+                0x05, 0x40, 0xE0, 0xD0, 0, 0, 0, 0, 0, 6, 9, 0, 0, 0, 0xAA, 0x55
             ]
         );
-        assert_eq!(record(&block, 16)[0], 0x02);
+        assert_eq!(record(&block, 4 * 16)[0], 0x05);
     }
 
     #[test]
