@@ -55,7 +55,7 @@ pub fn open_session(
             info!(
                 index = assignment.index,
                 alias = %assignment.alias,
-                name = %description.name,
+                name = ?description.name,
                 configured = assignment.configured,
                 "controller mapped"
             );

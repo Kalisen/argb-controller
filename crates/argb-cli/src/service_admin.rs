@@ -20,6 +20,23 @@ pub const INSTALL_DIR_NAME: &str = "argb-controller";
 const PROGRAM_FILES_ENV: &str = "ProgramFiles";
 /// Fallback when the environment variable is missing.
 const PROGRAM_FILES_FALLBACK: &str = r"C:\Program Files";
+/// Environment variable Windows uses for its own folder.
+const SYSTEM_ROOT_ENV: &str = "SystemRoot";
+/// Fallback when the environment variable is missing.
+const SYSTEM_ROOT_FALLBACK: &str = r"C:\Windows";
+/// Folder under the Windows folder that holds the system tools.
+const SYSTEM_TOOLS_DIR: &str = "System32";
+/// The ACL tool.
+const ICACLS_TOOL: &str = "icacls.exe";
+/// The service configuration tool.
+const SC_TOOL: &str = "sc.exe";
+/// `sc.exe` verb that sets the privileges a service's process keeps.
+const SC_PRIVS_VERB: &str = "privs";
+/// The only privilege the service needs: traversing directories without
+/// a check at every level, which every account has. Everything else the
+/// account would carry (impersonation among them) is dropped from the
+/// process token, so a compromised service cannot climb from it.
+pub const SERVICE_PRIVILEGES: &str = "SeChangeNotifyPrivilege";
 /// Account the service runs as. Least privilege: loopback network access and
 /// read access to the configuration are all it needs.
 pub const SERVICE_ACCOUNT: &str = r"NT AUTHORITY\LocalService";
@@ -72,6 +89,37 @@ pub fn log_acl_arguments(dir: &Path) -> Vec<String> {
         format!("{}:(OI)(CI)M", sid::LOCAL_SERVICE),
         "/Q".into(),
     ]
+}
+
+/// A Windows system tool by its absolute path, so the installer (which runs
+/// elevated) never resolves the tool through the search path.
+#[must_use]
+pub fn system_tool(name: &str) -> PathBuf {
+    let root = std::env::var_os(SYSTEM_ROOT_ENV)
+        .map_or_else(|| PathBuf::from(SYSTEM_ROOT_FALLBACK), PathBuf::from);
+    root.join(SYSTEM_TOOLS_DIR).join(name)
+}
+
+/// `sc.exe` arguments that leave the service process only
+/// [`SERVICE_PRIVILEGES`].
+#[must_use]
+pub fn privileges_arguments(service_name: &str) -> Vec<String> {
+    vec![
+        SC_PRIVS_VERB.into(),
+        service_name.into(),
+        SERVICE_PRIVILEGES.into(),
+    ]
+}
+
+/// Whether the configured OpenRGB host is a loopback address or name. The
+/// SDK is unauthenticated and unencrypted, so any other host means driving
+/// lighting across a network in the clear.
+#[must_use]
+pub fn is_loopback_host(host: &str) -> bool {
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|address| address.is_loopback())
 }
 
 /// The default program directory, e.g. `C:\Program Files\argb-controller`.
@@ -130,12 +178,35 @@ pub fn prepare_config_dir(store: &ConfigStore) -> anyhow::Result<()> {
 }
 
 fn run_icacls(args: Vec<String>, dir: &Path) -> anyhow::Result<()> {
-    let status = Command::new("icacls")
+    let tool = system_tool(ICACLS_TOOL);
+    let status = Command::new(&tool)
         .args(args)
         .status()
-        .context("running icacls")?;
+        .with_context(|| format!("running {}", tool.display()))?;
     if !status.success() {
         bail!("icacls failed with {status} on {}", dir.display());
+    }
+    Ok(())
+}
+
+/// Restricts the privileges of the service process to
+/// [`SERVICE_PRIVILEGES`] through `sc.exe`, which the service library does
+/// not expose.
+///
+/// # Errors
+/// When `sc.exe` cannot run or refuses.
+pub fn restrict_privileges(service_name: &str) -> anyhow::Result<()> {
+    let tool = system_tool(SC_TOOL);
+    let output = Command::new(&tool)
+        .args(privileges_arguments(service_name))
+        .output()
+        .with_context(|| format!("running {}", tool.display()))?;
+    if !output.status.success() {
+        bail!(
+            "sc.exe privs failed with {}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout).trim()
+        );
     }
     Ok(())
 }
@@ -169,6 +240,20 @@ pub fn check(store: &ConfigStore) -> bool {
                     store.path().display(),
                     config.devices.len()
                 ),
+            );
+            let loopback = is_loopback_host(&config.openrgb.host);
+            report(
+                loopback,
+                "OpenRGB host",
+                if loopback {
+                    format!("{} (loopback)", config.openrgb.host)
+                } else {
+                    format!(
+                        "{} is not a loopback address; the SDK has no authentication or \
+                         encryption, so keep OpenRGB and the service on the same machine",
+                        config.openrgb.host
+                    )
+                },
             );
             let reachable = openrgb_reachable(&config.openrgb.host, config.openrgb.port);
             report(
@@ -218,8 +303,8 @@ pub mod platform {
     use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
 
     use super::{
-        FAILURE_RESET_PERIOD, RESTART_DELAY, SERVICE_ACCOUNT, STATE_CHANGE_TIMEOUT,
-        prepare_config_dir,
+        FAILURE_RESET_PERIOD, RESTART_DELAY, SERVICE_ACCOUNT, SERVICE_PRIVILEGES,
+        STATE_CHANGE_TIMEOUT, prepare_config_dir, restrict_privileges,
     };
 
     /// Windows error: access denied.
@@ -384,6 +469,8 @@ pub mod platform {
                 ]),
             })
             .context("setting the restart policy")?;
+        restrict_privileges(SERVICE_NAME)?;
+        println!("service process limited to {SERVICE_PRIVILEGES}");
 
         if start {
             service.start::<&str>(&[]).context("starting the service")?;
@@ -581,6 +668,30 @@ mod tests {
     #[test]
     fn install_dir_is_under_program_files() {
         assert!(default_install_dir().ends_with(INSTALL_DIR_NAME));
+    }
+
+    #[test]
+    fn system_tools_are_addressed_under_the_windows_system_folder() {
+        let tool = system_tool(ICACLS_TOOL);
+        assert!(tool.is_absolute());
+        assert!(tool.ends_with(Path::new(SYSTEM_TOOLS_DIR).join(ICACLS_TOOL)));
+    }
+
+    #[test]
+    fn the_service_keeps_only_the_traverse_privilege() {
+        assert_eq!(
+            privileges_arguments("argb-controller"),
+            vec!["privs", "argb-controller", "SeChangeNotifyPrivilege"]
+        );
+    }
+
+    #[test]
+    fn loopback_hosts_are_recognized_and_others_are_not() {
+        assert!(is_loopback_host("127.0.0.1"));
+        assert!(is_loopback_host("::1"));
+        assert!(is_loopback_host("localhost"));
+        assert!(!is_loopback_host("192.168.1.10"));
+        assert!(!is_loopback_host("openrgb.lan"));
     }
 
     #[test]

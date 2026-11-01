@@ -50,7 +50,9 @@ without that line.
 - Log messages are not constants, though they may interpolate constants.
 - `unsafe` is forbidden in project crates.
 - Run `cargo fmt`, `cargo clippy --all-targets` and `cargo test` before
-  committing.
+  committing, and `cargo audit` (from `cargo install cargo-audit`) when
+  `Cargo.lock` changes: a dependency with a published advisory is fixed by
+  bumping it, never waived.
 
 ## Tests
 

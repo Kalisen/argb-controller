@@ -23,6 +23,13 @@ pub const MIN_PROTOCOL_VERSION: u32 = 3;
 pub const MAX_PROTOCOL_VERSION: u32 = 4;
 /// Device index used for packets that address the server rather than a device.
 pub const SERVER_DEVICE_INDEX: u32 = 0;
+/// Longest payload a packet may declare. The header's length field is a
+/// `u32` and the client allocates the payload before reading it, so without
+/// a bound a peer that squats the SDK port could make the client commit
+/// gigabytes on one header. The largest real payload is a controller
+/// description; even a 65535-LED controller with long names fits well under
+/// this.
+pub const MAX_PAYLOAD_LEN: u32 = 16 * 1024 * 1024;
 
 /// Packet identifiers understood by this client.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -103,6 +110,14 @@ pub enum ProtocolError {
     /// The server serialized with a version this client cannot parse.
     #[error("protocol version {0} is not supported by this client")]
     UnsupportedVersion(u32),
+    /// A header declared a payload longer than [`MAX_PAYLOAD_LEN`].
+    #[error("packet declares a {declared}-byte payload, above the {max}-byte limit")]
+    Oversized {
+        /// Length the header declared.
+        declared: u32,
+        /// The limit.
+        max: u32,
+    },
 }
 
 impl TryFrom<u32> for PacketId {
@@ -159,7 +174,9 @@ impl Header {
     /// Parses a header.
     ///
     /// # Errors
-    /// [`ProtocolError::BadMagic`] or [`ProtocolError::UnknownPacketId`].
+    /// [`ProtocolError::BadMagic`], [`ProtocolError::UnknownPacketId`], or
+    /// [`ProtocolError::Oversized`] when the payload length exceeds
+    /// [`MAX_PAYLOAD_LEN`].
     pub fn decode(bytes: &[u8; HEADER_LEN]) -> Result<Self, ProtocolError> {
         let [
             m0,
@@ -182,10 +199,17 @@ impl Header {
         if [m0, m1, m2, m3] != MAGIC {
             return Err(ProtocolError::BadMagic);
         }
+        let payload_len = u32::from_le_bytes([l0, l1, l2, l3]);
+        if payload_len > MAX_PAYLOAD_LEN {
+            return Err(ProtocolError::Oversized {
+                declared: payload_len,
+                max: MAX_PAYLOAD_LEN,
+            });
+        }
         Ok(Self {
             device_index: u32::from_le_bytes([d0, d1, d2, d3]),
             packet_id: PacketId::try_from(u32::from_le_bytes([i0, i1, i2, i3]))?,
-            payload_len: u32::from_le_bytes([l0, l1, l2, l3]),
+            payload_len,
         })
     }
 }
@@ -428,6 +452,25 @@ mod tests {
         assert_eq!(
             Header::decode(&bytes),
             Err(ProtocolError::UnknownPacketId(9999))
+        );
+    }
+
+    #[test]
+    fn decode_rejects_a_payload_longer_than_the_limit() {
+        let mut bytes = Header {
+            device_index: 0,
+            packet_id: PacketId::RequestControllerData,
+            payload_len: MAX_PAYLOAD_LEN,
+        }
+        .encode();
+        assert!(Header::decode(&bytes).is_ok());
+        bytes[12..16].copy_from_slice(&(MAX_PAYLOAD_LEN + 1).to_le_bytes());
+        assert_eq!(
+            Header::decode(&bytes),
+            Err(ProtocolError::Oversized {
+                declared: MAX_PAYLOAD_LEN + 1,
+                max: MAX_PAYLOAD_LEN
+            })
         );
     }
 
