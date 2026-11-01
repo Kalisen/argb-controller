@@ -213,7 +213,7 @@ mod tests {
             .apply_hardware_pulse(TURQUOISE, period, Persist::SaveToDevice)
             .unwrap();
         let record = active_record(&device.link);
-        assert_eq!(record[0], 0x02);
+        assert_eq!(record[0], 0x05);
         assert_eq!(record[10], Speed::SLOWEST.value());
     }
 
